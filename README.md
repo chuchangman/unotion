@@ -130,7 +130,17 @@ Sender    본인@gmail.com   ← Username 과 반드시 동일. 다르면 Gmail 
 npm run check:email -- 받을주소@example.com
 ```
 
-### 7. 실행
+### 7. Google 로그인 (권장)
+
+Google Cloud Console 에서 OAuth 클라이언트를 만들고 Supabase 에 연결한다.
+절차와 함정은 **[docs/social-login.md](docs/social-login.md)** 에 있다.
+
+> 승인된 리디렉션 URI 는 앱 주소가 아니라 `https://<ref>.supabase.co/auth/v1/callback` 이다.
+> 여기서 대부분 막힌다.
+
+팀 초대는 **[docs/invites.md](docs/invites.md)** 참고.
+
+### 8. 실행
 
 ```bash
 npm run dev
@@ -161,6 +171,29 @@ GitHub → Settings → Secrets and variables → Actions 에서 등록한다.
 | 오래 오프라인이던 클라이언트의 변경분 전파 | 재접속 시 전체 상태를 broadcast 하지만 200KB 초과 시 생략하고 서버 저장에만 의존한다. 이때 다른 사람은 새로고침 후 본다. 5인 규모에서는 문제없고, 커지면 Hocuspocus/Liveblocks 이전 신호다 |
 | `legacy-peer-deps=true` (`.npmrc`) | BlockNote 0.54 가 신 `@y/*`(RC)와 구 `yjs@13`(안정)을 모두 optional peer 로 잡는데, `@y/protocols@1.0.6-rc.1` 이 `@y/y@*` 를 요구하고 `*` 는 프리릴리스를 매치하지 않아 신 라인이 설치 불가다. 팀 지식베이스에 RC CRDT 를 깔지 않기 위해 안정판으로 고정했다. Vercel 빌드도 같은 해석을 쓰도록 커밋한다 |
 | dev 전용 취약점 4건 (moderate) | `drizzle-kit` 내부 esbuild. 프로덕션 의존성은 0건이며 배포물에 포함되지 않는다 |
+
+## 성능 메모
+
+체감 속도 문제의 원인은 코드가 아니라 **리전**이었다.
+
+| | 이전 | 이후 |
+|---|---|---|
+| 함수 리전 | iad1 (버지니아, Vercel 기본) | icn1 (서울, `vercel.json`) |
+| DB 왕복 (`select 1`) | warm 184ms / cold 1,133ms | **4ms / 59ms** |
+
+Supabase 가 `ap-northeast-2`(서울)인데 함수가 미국에 있어 모든 쿼리가
+태평양을 왕복했다. 페이지 로드마다 이걸 8번쯤 순차로 하니 1.5초가 나왔다.
+
+함께 걷어낸 왕복들:
+
+- `getUser()` 가 한 요청에 3번 불렸다 → React `cache()` 로 1회
+- **렌더마다 `profiles` UPSERT** 를 돌렸다 → 로그인 콜백 1회로 분리
+- 페이지 뷰가 `pages` 를 두 번 조회했다 → 사전 로드한 행 재사용
+- 에디터가 StrictMode 이중 실행으로 `loadYdoc` 을 4번 호출 → 가드
+- `postgres` `idle_timeout` 20s → 300s (warm 람다가 연결 재사용)
+
+> ⚠️ 새 리전으로 옮길 때는 **Supabase 리전과 반드시 맞춰야 한다.** 이게 이 앱에서
+> 가장 큰 단일 성능 변수다.
 
 ## 다음 단계
 
