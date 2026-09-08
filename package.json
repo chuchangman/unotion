@@ -56,5 +56,8 @@
     "tailwindcss": "^4",
     "tsx": "^4.23.13",
     "typescript": "^5"
+  },
+  "overrides": {
+    "jsdom": "^26.1.0"
   }
 }

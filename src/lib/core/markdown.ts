@@ -10,40 +10,50 @@
  */
 import 'server-only'
 import * as Y from 'yjs'
-import { ServerBlockNoteEditor } from '@blocknote/server-util'
+import type { ServerBlockNoteEditor } from '@blocknote/server-util'
 
 /** Editor.tsx 의 doc.getXmlFragment('blocknote') 와 반드시 같아야 한다 */
 export const FRAGMENT = 'blocknote'
 
-let cached: ReturnType<typeof ServerBlockNoteEditor.create> | null = null
+type Editor = ReturnType<typeof ServerBlockNoteEditor.create>
+let cached: Editor | null = null
 
-/** 생성 비용이 있으므로 요청 간 재사용한다 (상태를 갖지 않는 변환기) */
-function editor() {
-  cached ??= ServerBlockNoteEditor.create()
+/**
+ * 지연 import 가 필수다.
+ * 최상위에서 import 하면 Next 가 빌드 중 라우트 설정을 읽으려고 모듈을 평가하는데,
+ * 그 시점의 react-server 조건에는 React.createContext 가 없어
+ * "UA.createContext is not a function" 으로 빌드가 죽는다.
+ * 생성 비용이 있으므로 한 번 만들고 요청 간 재사용한다.
+ */
+async function editor(): Promise<Editor> {
+  if (!cached) {
+    const { ServerBlockNoteEditor: E } = await import('@blocknote/server-util')
+    cached = E.create()
+  }
   return cached
 }
 
 export type WriteMode = 'replace' | 'append' | 'prepend'
 
 export async function markdownToBlocks(markdown: string) {
-  return editor().tryParseMarkdownToBlocks(markdown)
+  return (await editor()).tryParseMarkdownToBlocks(markdown)
 }
 
 export async function blocksToMarkdown(blocks: unknown) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return editor().blocksToMarkdownLossy(blocks as any)
+  return (await editor()).blocksToMarkdownLossy(blocks as any)
 }
 
-export function ydocBytesToBlocks(bytes: Buffer | Uint8Array | null) {
+export async function ydocBytesToBlocks(bytes: Buffer | Uint8Array | null) {
   if (!bytes || bytes.byteLength === 0) return []
   const doc = new Y.Doc()
   Y.applyUpdate(doc, new Uint8Array(bytes))
-  return editor().yDocToBlocks(doc, FRAGMENT)
+  return (await editor()).yDocToBlocks(doc, FRAGMENT)
 }
 
 /** 저장된 ydoc 을 마크다운으로. 없으면 빈 문자열. */
 export async function ydocBytesToMarkdown(bytes: Buffer | Uint8Array | null) {
-  const blocks = ydocBytesToBlocks(bytes)
+  const blocks = await ydocBytesToBlocks(bytes)
   return blocks.length ? blocksToMarkdown(blocks) : ''
 }
 
@@ -69,7 +79,7 @@ export async function applyMarkdown(
   markdown: string,
   mode: WriteMode,
 ): Promise<ApplyResult> {
-  const ed = editor()
+  const ed = await editor()
   const doc = new Y.Doc()
   if (current && current.byteLength > 0) {
     Y.applyUpdate(doc, new Uint8Array(current))

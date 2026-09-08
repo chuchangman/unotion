@@ -18,6 +18,7 @@ export async function GET() {
       status: 'ok',
       db: 'connected',
       latencyMs: Date.now() - started,
+      node: process.version,
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
