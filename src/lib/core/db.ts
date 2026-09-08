@@ -37,8 +37,9 @@ function init(): DrizzleDb {
   const client = postgres(connectionString, {
     prepare: false,
     max: 1,
-    idle_timeout: 20,
-    // 기본값은 재시도하며 20초 넘게 매달린다. 막힌 포트를 빨리 드러내려면 짧게 잡는다.
+    // warm 람다가 연결을 재사용하도록 넉넉히 잡는다.
+    // 짧으면 매 요청이 TLS+인증 왕복을 다시 치른다 (cold 1,100ms 의 주범).
+    idle_timeout: 300,
     connect_timeout: 10,
   })
 

@@ -97,12 +97,21 @@ export function Editor({ pageId, title, user, canEdit }: EditorProps) {
     return () => { void idb.destroy() }
   }, [pageId, doc])
 
+  // StrictMode 는 개발 중 이펙트를 두 번 실행한다. 가드가 없으면 connect() 가
+  // 두 번 돌아 서버 스냅샷을 중복으로 읽는다 (로그에서 loadYdoc 4회로 보였다).
+  const connected = useRef<SupabaseYjsProvider | null>(null)
   useEffect(() => {
     let cancelled = false
-    provider.connect().then(() => { if (!cancelled) setReady(true) })
+    if (connected.current !== provider) {
+      connected.current = provider
+      provider.connect().then(() => { if (!cancelled) setReady(true) })
+    } else {
+      setReady(true)
+    }
     return () => {
       cancelled = true
       provider.destroy()
+      connected.current = null
     }
   }, [provider])
 

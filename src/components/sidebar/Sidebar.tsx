@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { useTransition } from 'react'
-import { KeyRound, Plus } from 'lucide-react'
+import { KeyRound, Plus, Users } from 'lucide-react'
 import { createPage } from '@/app/actions/pages'
 import { PageTree } from './PageTree'
 import type { TreeNode } from '@/lib/core/pages'
@@ -46,6 +46,14 @@ export function Sidebar({ workspace, nodes, user }: Props) {
           <Plus className="size-4" />
           새 페이지
         </button>
+
+        <Link
+          href="/settings/members"
+          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-800"
+        >
+          <Users className="size-4" />
+          팀 멤버
+        </Link>
 
         <Link
           href="/settings/tokens"

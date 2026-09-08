@@ -68,6 +68,21 @@ export async function createWorkspace(actor: Actor, name: string) {
   return result
 }
 
+/**
+ * 기본 워크스페이스를 **읽기만** 한다 (렌더 경로용).
+ * 단일 쿼리 + limit 1 이라 왕복이 하나다.
+ */
+export async function getPrimaryWorkspace(userId: string) {
+  const [row] = await db
+    .select({ id: workspaces.id, name: workspaces.name })
+    .from(workspaceMembers)
+    .innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId))
+    .where(eq(workspaceMembers.userId, userId))
+    .orderBy(asc(workspaces.createdAt))
+    .limit(1)
+  return row ?? null
+}
+
 /** 로그인 사용자의 기본 워크스페이스. 없으면 만든다. */
 export async function getOrCreateDefaultWorkspace(actor: Actor) {
   const mine = await getMyWorkspaces(actor.userId)

@@ -1,13 +1,11 @@
 import { redirect } from 'next/navigation'
-import { bootstrapSession } from '@/lib/auth'
+import { requireSessionContext } from '@/lib/auth'
 import { getPageTree } from '@/lib/core/pages'
 
 /** 홈: 첫 페이지로 보낸다. 페이지가 하나도 없으면 안내를 띄운다. */
 export default async function Home() {
-  const session = await bootstrapSession()
-  if (!session) redirect('/login')
-
-  const nodes = await getPageTree(session.actor, session.workspace.id)
+  const { actor, workspace } = await requireSessionContext()
+  const nodes = await getPageTree(actor, workspace.id)
   if (nodes.length > 0) redirect(`/p/${nodes[0].id}`)
 
   return (

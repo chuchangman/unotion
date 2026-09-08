@@ -61,12 +61,17 @@ export function ancestorIdsFromPath(path: string): string[] {
 export async function resolvePageAccess(
   userId: string,
   pageId: string,
+  /**
+   * 호출자가 이미 그 행을 가지고 있으면 넘긴다 — 같은 요청에서 pages 를
+   * 두 번 조회하지 않기 위한 것이다 (페이지 뷰가 그런 경우였다).
+   */
+  known?: { id: string; workspaceId: string; path: string },
 ): Promise<{ level: PermissionLevel; workspaceId: string; role: WorkspaceRole | null } | null> {
-  const [page] = await db
+  const page = known ?? (await db
     .select({ id: pages.id, workspaceId: pages.workspaceId, path: pages.path })
     .from(pages)
     .where(eq(pages.id, pageId))
-    .limit(1)
+    .limit(1))[0]
   if (!page) throw new NotFound('Page')
 
   const chain = [page.id, ...ancestorIdsFromPath(page.path)]
