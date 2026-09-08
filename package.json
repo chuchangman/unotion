@@ -11,7 +11,8 @@
     "db:status": "node scripts/migrate.mjs --status",
     "check:email": "node scripts/check-email.mjs",
     "check:db": "node scripts/check-db.mjs",
-    "check:mcp": "node scripts/check-mcp.mjs"
+    "check:mcp": "node scripts/check-mcp.mjs",
+    "check:realtime": "node scripts/check-realtime.mjs"
   },
   "dependencies": {
     "@blocknote/core": "^0.54.0",

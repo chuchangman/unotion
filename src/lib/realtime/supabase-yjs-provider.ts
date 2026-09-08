@@ -52,6 +52,7 @@ export class SupabaseYjsProvider {
   readonly awareness: Awareness
   private channel: RealtimeChannel | null = null
   private saveTimer: ReturnType<typeof setTimeout> | null = null
+  private authSub: { unsubscribe: () => void } | null = null
   private destroyed = false
   /** 원격에서 온 업데이트를 되돌려 보내지 않기 위한 마커 */
   private readonly origin = Symbol('supabase-yjs-provider')
@@ -64,6 +65,25 @@ export class SupabaseYjsProvider {
   async connect() {
     const { supabase, pageId, doc, load, onStatus } = this.opts
     onStatus?.('connecting')
+
+    /**
+     * ★ private 채널은 소켓에 사용자 JWT 를 실어야 한다.
+     * 이걸 빠뜨리면 realtime.messages RLS 안에서 auth.uid() 가 비어
+     * 구독이 통째로 거부된다:
+     *   "Unauthorized: You do not have permissions to read from this Channel topic"
+     * 인자 없이 부르면 현재 세션의 액세스 토큰을 알아서 싣는다.
+     */
+    await supabase.realtime.setAuth()
+
+    /**
+     * 액세스 토큰은 기본 1시간마다 갱신된다. 갱신분을 소켓에 다시 실어주지 않으면
+     * 오래 열어둔 탭에서 어느 순간 조용히 동기화가 끊긴다.
+     */
+    this.authSub = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') {
+        void supabase.realtime.setAuth()
+      }
+    }).data.subscription
 
     const snapshot = await load()
     if (snapshot && snapshot.byteLength > 0) {
@@ -96,11 +116,13 @@ export class SupabaseYjsProvider {
     doc.on('update', this.handleDocUpdate)
     this.awareness.on('update', this.handleAwarenessUpdate)
 
-    channel.subscribe((status) => {
+    channel.subscribe((status, err) => {
       if (status === 'SUBSCRIBED') {
         onStatus?.('connected')
         this.broadcastFullState()
-      } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+      } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+        // 조용히 넘기면 "왜 협업이 안 되지" 를 추적할 수 없다.
+        if (err) console.error('[yjs] 채널 오류:', err.message ?? err)
         onStatus?.('disconnected')
       }
     })
@@ -165,6 +187,8 @@ export class SupabaseYjsProvider {
     this.opts.doc.off('update', this.handleDocUpdate)
     this.awareness.off('update', this.handleAwarenessUpdate)
     this.awareness.destroy()
+    this.authSub?.unsubscribe()
+    this.authSub = null
     if (this.channel) void this.opts.supabase.removeChannel(this.channel)
     this.channel = null
   }
