@@ -6,7 +6,7 @@
  */
 import 'server-only'
 import { randomBytes } from 'node:crypto'
-import { and, asc, desc, eq, isNull } from 'drizzle-orm'
+import { and, asc, desc, eq, gt, isNull } from 'drizzle-orm'
 import { db } from './db'
 import { invites, profiles, workspaceMembers } from './schema'
 import { Forbidden, InvalidInput, NotFound } from './errors'
@@ -86,6 +86,52 @@ export async function revokeInvite(actor: Actor, inviteId: string) {
   await audit.record(actor, 'invite.revoke', {
     workspaceId: row.workspaceId, targetId: inviteId, meta: { email: row.email },
   })
+}
+
+/**
+ * 이메일로 대기 중인 초대를 찾는다.
+ *
+ * Google 로그인을 쓰면 사람들은 초대 링크를 누르지 않고 그냥 로그인해버린다.
+ * 그래서 로그인 시점에 이걸로 초대를 자동 수락한다.
+ */
+export async function findPendingInviteByEmail(email: string) {
+  const [row] = await db
+    .select({
+      id: invites.id,
+      workspaceId: invites.workspaceId,
+      role: invites.role,
+      email: invites.email,
+    })
+    .from(invites)
+    .where(and(
+      eq(invites.email, email.trim().toLowerCase()),
+      isNull(invites.acceptedAt),
+      gt(invites.expiresAt, new Date()),
+    ))
+    .orderBy(asc(invites.expiresAt))
+    .limit(1)
+  return row ?? null
+}
+
+/** 로그인 시 자동 수락. 이미 멤버면 조용히 넘어간다. */
+export async function autoAcceptInvite(
+  actor: Actor,
+  email: string,
+): Promise<{ workspaceId: string } | null> {
+  const invite = await findPendingInviteByEmail(email)
+  if (!invite) return null
+
+  await db.transaction(async (tx) => {
+    await tx.insert(workspaceMembers)
+      .values({ workspaceId: invite.workspaceId, userId: actor.userId, role: invite.role })
+      .onConflictDoNothing()
+    await tx.update(invites).set({ acceptedAt: new Date() }).where(eq(invites.id, invite.id))
+  })
+
+  await audit.record(actor, 'invite.auto_accept', {
+    workspaceId: invite.workspaceId, targetId: invite.id, meta: { email },
+  })
+  return { workspaceId: invite.workspaceId }
 }
 
 /** 초대 정보 조회 (수락 화면에서 무엇에 초대됐는지 보여주기 위함) */

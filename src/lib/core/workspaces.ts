@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull } from 'drizzle-orm'
+import { and, asc, eq, isNull, sql } from 'drizzle-orm'
 import { generateKeyBetween } from 'fractional-indexing'
 import { db } from './db'
 import { pages, profiles, workspaceMembers, workspaces } from './schema'
@@ -73,22 +73,55 @@ export async function createWorkspace(actor: Actor, name: string) {
  * 단일 쿼리 + limit 1 이라 왕복이 하나다.
  */
 export async function getPrimaryWorkspace(userId: string) {
-  const [row] = await db
-    .select({ id: workspaces.id, name: workspaces.name })
-    .from(workspaceMembers)
-    .innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId))
-    .where(eq(workspaceMembers.userId, userId))
-    .orderBy(asc(workspaces.createdAt))
-    .limit(1)
-  return row ?? null
+  /**
+   * ★ 정렬 기준이 중요하다.
+   * createdAt 오름차순으로 하면, 예전 버그로 각자 만들어진 1인 워크스페이스가
+   * 나중에 초대로 참여한 팀 워크스페이스보다 우선해버린다.
+   * 멤버가 많은 쪽(= 실제 팀)을 먼저 고르고, 동수면 오래된 쪽을 고른다.
+   */
+  const rows = await db.execute(sql`
+    SELECT w.id, w.name,
+           (SELECT count(*) FROM workspace_members m2 WHERE m2.workspace_id = w.id) AS member_count
+      FROM workspace_members m
+      JOIN workspaces w ON w.id = m.workspace_id
+     WHERE m.user_id = ${userId}
+     ORDER BY member_count DESC, w.created_at ASC
+     LIMIT 1
+  `)
+  const row = (rows as unknown as Array<Record<string, unknown>>)[0]
+  return row ? { id: row.id as string, name: row.name as string } : null
 }
 
-/** 로그인 사용자의 기본 워크스페이스. 없으면 만든다. */
-export async function getOrCreateDefaultWorkspace(actor: Actor) {
+/**
+ * 아직 워크스페이스가 하나도 없는 새 인스턴스인지.
+ * "첫 사용자만 자동 생성" 규칙의 판단 근거다.
+ */
+export async function isFirstRun(): Promise<boolean> {
+  const [row] = await db.select({ id: workspaces.id }).from(workspaces).limit(1)
+  return !row
+}
+
+/**
+ * 로그인 시 워크스페이스 확보.
+ *
+ * ⚠️ 예전에는 "내 워크스페이스가 없으면 새로 만든다" 였다.
+ * 그 결과 팀원이 Google 로 그냥 로그인할 때마다 각자 1인 워크스페이스가
+ * 생겨서 아무도 같은 위키를 못 봤다.
+ *
+ * 이제는 **아무도 워크스페이스를 안 가진 최초 1회에만** 만든다.
+ * 그 뒤에 들어오는 사람은 초대를 통해서만 합류한다.
+ */
+export async function ensureWorkspaceOnLogin(actor: Actor) {
   const mine = await getMyWorkspaces(actor.userId)
   if (mine.length > 0) return { id: mine[0].id, name: mine[0].name }
-  const { workspace } = await createWorkspace(actor, '우리 팀')
-  return { id: workspace.id, name: workspace.name }
+
+  if (await isFirstRun()) {
+    const { workspace } = await createWorkspace(actor, '우리 팀')
+    return { id: workspace.id, name: workspace.name }
+  }
+
+  // 초대받지 못한 사용자 — 대기 화면을 보여준다
+  return null
 }
 
 /** @멘션 / 담당자 지정 / MCP list_members 용 */

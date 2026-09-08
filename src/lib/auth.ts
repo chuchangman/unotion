@@ -1,7 +1,8 @@
 import { cache } from 'react'
 import { redirect } from 'next/navigation'
 import { createClient } from './supabase/server'
-import { ensureProfile, getOrCreateDefaultWorkspace, getPrimaryWorkspace } from './core/workspaces'
+import { ensureProfile, ensureWorkspaceOnLogin, getPrimaryWorkspace } from './core/workspaces'
+import { autoAcceptInvite } from './core/invites'
 import { webActor } from './core/actor'
 import type { Actor } from './core/actor'
 
@@ -64,8 +65,13 @@ export const getSessionContext = cache(async (): Promise<SessionContext | null> 
 })
 
 export async function requireSessionContext(): Promise<SessionContext> {
+  const user = await currentUser()
+  if (!user) redirect('/login')
+
   const ctx = await getSessionContext()
-  if (!ctx) redirect('/login')
+  // 로그인은 했지만 아직 어떤 워크스페이스에도 속하지 않은 경우.
+  // /login 으로 보내면 이미 로그인 상태라 무한 루프가 된다.
+  if (!ctx) redirect('/pending')
   return ctx
 }
 
@@ -85,6 +91,15 @@ export async function bootstrapAfterLogin() {
   })
 
   const actor = webActor(user.id)
-  const workspace = await getOrCreateDefaultWorkspace(actor)
+
+  /**
+   * Google 로그인을 쓰면 사람들은 초대 링크를 안 누르고 그냥 로그인한다.
+   * 그래서 여기서 대기 중 초대를 자동 수락한다 — 초대 → 로그인만으로 합류된다.
+   */
+  const email = user.email ?? ''
+  if (email) await autoAcceptInvite(actor, email)
+
+  // null 이면 초대받지 못한 사용자다 (워크스페이스를 함부로 만들지 않는다)
+  const workspace = await ensureWorkspaceOnLogin(actor)
   return { actor, workspace }
 }
