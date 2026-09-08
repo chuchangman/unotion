@@ -39,3 +39,13 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local env
+.env
+.env.local
+
+# drizzle 로컬 산출물
+.drizzle-tmp/
+
+# .env* 로 전부 무시하되 예제는 커밋한다
+!.env.example

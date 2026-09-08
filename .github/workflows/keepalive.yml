@@ -1,0 +1,29 @@
+# Supabase 무료 프로젝트는 7일간 DB 쿼리가 없으면 일시정지된다.
+# 대시보드 방문이나 캐시된 응답은 활동으로 카운트되지 않는다.
+#
+# Data API(PostgREST)를 끈 구성이므로 /rest/v1 을 쓸 수 없다.
+# psql 로 직접 쿼리해서 확실하게 DB 활동을 만든다.
+# (backup.yml 의 pg_dump 도 DB 활동이므로 이건 그게 실패했을 때의 보험이다.)
+#
+# 필요한 Secret: SUPABASE_DB_URL — backup.yml 과 동일한 값을 재사용한다.
+name: supabase-keepalive
+
+on:
+  schedule:
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: psql 설치
+        run: sudo apt-get update -qq && sudo apt-get install -y postgresql-client
+
+      - name: 가벼운 쿼리 1회
+        env:
+          PGURL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          test -n "$PGURL" || { echo "SUPABASE_DB_URL secret 이 없습니다"; exit 1; }
+          psql "$PGURL" -Atc "select 'alive', now(), count(*) from public.pages;"

@@ -1,0 +1,171 @@
+'use client'
+
+/**
+ * Supabase Realtime broadcast 위에서 동작하는 Yjs 프로바이더.
+ * Hocuspocus 를 안 쓰는 대신 상시 서버 프로세스가 0개다 (무료 티어 목표).
+ *
+ * 동작:
+ *   1) 서버에서 ydoc 스냅샷을 받아 적용한다 (초기 상태 = DB)
+ *   2) y-indexeddb 가 로컬 오프라인 편집을 보존하고 자동 머지한다
+ *   3) 로컬 변경분(증분)만 broadcast 한다 — 페이로드가 작아 한도에 안 걸린다
+ *   4) 유휴 2초마다 전체 상태를 서버에 저장한다
+ *
+ * CRDT 라서 (4)의 last-writer-persists 가 안전하다:
+ * 모든 클라이언트가 동일 상태로 수렴하므로 누가 저장해도 결과가 같다.
+ *
+ * ⚠️ 알려진 한계: 오래 오프라인이었던 클라이언트의 변경분은 재접속 시
+ * 전체 상태 broadcast 로 전파되는데, 문서가 크면(> MAX_BROADCAST_BYTES)
+ * 생략되고 서버 저장에만 의존한다. 이때 다른 사람은 새로고침 후 본다.
+ * 5인 규모에서는 실질적 문제가 없지만, 팀이 커지면 Hocuspocus/Liveblocks 로
+ * 옮기라는 신호로 본다.
+ */
+import * as Y from 'yjs'
+import { Awareness, encodeAwarenessUpdate, applyAwarenessUpdate } from 'y-protocols/awareness'
+import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js'
+import { bytesToBase64 as toBase64, base64ToBytes as fromBase64 } from '@/lib/base64'
+
+const MAX_BROADCAST_BYTES = 200_000
+const SAVE_DEBOUNCE_MS = 2_000
+
+
+export type ProviderUser = {
+  id: string
+  name: string
+  color: string
+}
+
+export type ProviderStatus = 'connecting' | 'connected' | 'disconnected'
+
+export type SupabaseYjsProviderOptions = {
+  supabase: SupabaseClient
+  pageId: string
+  doc: Y.Doc
+  user: ProviderUser
+  /** 서버에 전체 상태를 저장한다 (server action) */
+  save: (update: Uint8Array) => Promise<void>
+  /** 서버에서 스냅샷을 읽는다. 없으면 null */
+  load: () => Promise<Uint8Array | null>
+  onStatus?: (status: ProviderStatus) => void
+}
+
+export class SupabaseYjsProvider {
+  readonly awareness: Awareness
+  private channel: RealtimeChannel | null = null
+  private saveTimer: ReturnType<typeof setTimeout> | null = null
+  private destroyed = false
+  /** 원격에서 온 업데이트를 되돌려 보내지 않기 위한 마커 */
+  private readonly origin = Symbol('supabase-yjs-provider')
+
+  constructor(private readonly opts: SupabaseYjsProviderOptions) {
+    this.awareness = new Awareness(opts.doc)
+    this.awareness.setLocalStateField('user', opts.user)
+  }
+
+  async connect() {
+    const { supabase, pageId, doc, load, onStatus } = this.opts
+    onStatus?.('connecting')
+
+    const snapshot = await load()
+    if (snapshot && snapshot.byteLength > 0) {
+      Y.applyUpdate(doc, snapshot, this.origin)
+    }
+    if (this.destroyed) return
+
+    // private 채널 — realtime.messages RLS 가 접근을 통제한다 (0002_rls.sql)
+    const channel = supabase.channel(pageId, {
+      config: { broadcast: { self: false }, private: true },
+    })
+    this.channel = channel
+
+    channel.on('broadcast', { event: 'y-update' }, ({ payload }) => {
+      try {
+        Y.applyUpdate(doc, fromBase64(payload.update as string), this.origin)
+      } catch (err) {
+        console.error('[yjs] 원격 업데이트 적용 실패', err)
+      }
+    })
+
+    channel.on('broadcast', { event: 'y-awareness' }, ({ payload }) => {
+      try {
+        applyAwarenessUpdate(this.awareness, fromBase64(payload.update as string), this.origin)
+      } catch (err) {
+        console.error('[yjs] awareness 적용 실패', err)
+      }
+    })
+
+    doc.on('update', this.handleDocUpdate)
+    this.awareness.on('update', this.handleAwarenessUpdate)
+
+    channel.subscribe((status) => {
+      if (status === 'SUBSCRIBED') {
+        onStatus?.('connected')
+        this.broadcastFullState()
+      } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+        onStatus?.('disconnected')
+      }
+    })
+  }
+
+  /** 재접속 시 오프라인 중 변경분을 전파한다 (크기 한도 안에서만) */
+  private broadcastFullState() {
+    const full = Y.encodeStateAsUpdate(this.opts.doc)
+    if (full.byteLength <= MAX_BROADCAST_BYTES) {
+      void this.channel?.send({
+        type: 'broadcast', event: 'y-update',
+        payload: { update: toBase64(full) },
+      })
+    } else {
+      console.warn(
+        `[yjs] 문서가 커서(${full.byteLength}B) 전체 상태 broadcast 를 생략합니다. ` +
+        '서버 저장으로만 전파됩니다.',
+      )
+    }
+    this.scheduleSave()
+  }
+
+  private handleDocUpdate = (update: Uint8Array, origin: unknown) => {
+    if (origin === this.origin) return
+    void this.channel?.send({
+      type: 'broadcast', event: 'y-update',
+      payload: { update: toBase64(update) },
+    })
+    this.scheduleSave()
+  }
+
+  private handleAwarenessUpdate = (
+    { added, updated, removed }: { added: number[]; updated: number[]; removed: number[] },
+    origin: unknown,
+  ) => {
+    if (origin === this.origin) return
+    const changed = [...added, ...updated, ...removed]
+    void this.channel?.send({
+      type: 'broadcast', event: 'y-awareness',
+      payload: { update: toBase64(encodeAwarenessUpdate(this.awareness, changed)) },
+    })
+  }
+
+  private scheduleSave() {
+    if (this.saveTimer) clearTimeout(this.saveTimer)
+    this.saveTimer = setTimeout(() => {
+      if (this.destroyed) return
+      void this.opts.save(Y.encodeStateAsUpdate(this.opts.doc))
+        .catch((err) => console.error('[yjs] 서버 저장 실패', err))
+    }, SAVE_DEBOUNCE_MS)
+  }
+
+  /** 탭을 닫기 전 마지막 저장 */
+  async flush() {
+    if (this.saveTimer) clearTimeout(this.saveTimer)
+    await this.opts.save(Y.encodeStateAsUpdate(this.opts.doc))
+  }
+
+  destroy() {
+    this.destroyed = true
+    if (this.saveTimer) clearTimeout(this.saveTimer)
+    this.opts.doc.off('update', this.handleDocUpdate)
+    this.awareness.off('update', this.handleAwarenessUpdate)
+    this.awareness.destroy()
+    if (this.channel) void this.opts.supabase.removeChannel(this.channel)
+    this.channel = null
+  }
+}

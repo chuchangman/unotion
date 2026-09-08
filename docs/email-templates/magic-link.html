@@ -1,0 +1,41 @@
+<!-- Supabase 대시보드 → Authentication → Emails → Templates → "Magic Link" 에 붙여넣는다.
+     Supabase 가 제공하는 변수: {{ .ConfirmationURL }} {{ .Token }} {{ .SiteURL }} {{ .Email }}
+     이메일 클라이언트 호환을 위해 인라인 스타일만 쓴다 (외부 CSS/폰트 불가). -->
+<table width="100%" cellpadding="0" cellspacing="0" border="0"
+       style="background:#f6f6f5;padding:40px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Apple SD Gothic Neo','Malgun Gothic',sans-serif;">
+  <tr>
+    <td align="center">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="max-width:440px;background:#ffffff;border-radius:12px;border:1px solid #e5e5e4;padding:32px;">
+        <tr>
+          <td style="font-size:18px;font-weight:600;color:#171717;padding-bottom:8px;">
+            팀 위키 로그인
+          </td>
+        </tr>
+        <tr>
+          <td style="font-size:14px;line-height:1.6;color:#525252;padding-bottom:24px;">
+            아래 버튼을 누르면 로그인됩니다. 이 링크는 <strong>1시간</strong> 동안,
+            <strong>한 번만</strong> 사용할 수 있습니다.
+          </td>
+        </tr>
+        <tr>
+          <td style="padding-bottom:24px;">
+            <a href="{{ .ConfirmationURL }}"
+               style="display:inline-block;background:#171717;color:#ffffff;text-decoration:none;
+                      font-size:14px;font-weight:500;padding:11px 20px;border-radius:8px;">
+              로그인하기
+            </a>
+          </td>
+        </tr>
+        <tr>
+          <td style="font-size:12px;line-height:1.6;color:#a3a3a3;border-top:1px solid #f0f0ef;padding-top:16px;">
+            버튼이 안 눌리면 이 주소를 브라우저에 붙여넣으세요:<br>
+            <span style="color:#737373;word-break:break-all;">{{ .ConfirmationURL }}</span>
+            <br><br>
+            직접 요청하지 않았다면 이 메일은 무시하셔도 됩니다.
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>

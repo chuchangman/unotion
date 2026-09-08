@@ -1,0 +1,49 @@
+# 무료 티어에는 백업이 없다. 이 워크플로가 그걸 대신한다.
+#
+# 필요한 GitHub Secret 2개:
+#   SUPABASE_DB_URL   : 직접 연결 문자열 (포트 5432 — 풀러 6543 아님. pg_dump 용)
+#   BACKUP_REPO_TOKEN : 백업을 커밋할 프라이빗 레포의 PAT (같은 레포면 생략 가능)
+#
+# 보존: 90일. 덤프는 gzip 된 plain SQL 이라 5인 팀 규모면 수 MB 수준이다.
+name: nightly-db-backup
+
+on:
+  schedule:
+    - cron: '0 18 * * *'   # 매일 03:00 KST (UTC+9)
+  workflow_dispatch:        # 수동 실행 가능
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: pg_dump 17 설치
+        run: |
+          sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg
+          sudo sh -c 'echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-client-17
+
+      - name: 덤프
+        env:
+          PGURL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          test -n "$PGURL" || { echo "SUPABASE_DB_URL secret 이 없습니다"; exit 1; }
+          STAMP=$(date -u +%Y%m%d-%H%M)
+          pg_dump "$PGURL" \
+            --schema=public \
+            --no-owner --no-privileges \
+            --format=plain \
+          | gzip -9 > "backup-${STAMP}.sql.gz"
+          ls -lh backup-*.sql.gz
+          # 내용이 비었으면 실패시킨다 (조용한 빈 백업이 최악이다)
+          test "$(stat -c%s backup-${STAMP}.sql.gz)" -gt 1024
+
+      - name: 아티팩트 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-backup
+          path: backup-*.sql.gz
+          retention-days: 90
+          if-no-files-found: error
