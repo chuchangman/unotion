@@ -1,4 +1,4 @@
-import { and, asc, eq } from 'drizzle-orm'
+import { and, asc, eq, isNull } from 'drizzle-orm'
 import { generateKeyBetween } from 'fractional-indexing'
 import { db } from './db'
 import { pages, profiles, workspaceMembers, workspaces } from './schema'
@@ -106,6 +106,26 @@ export async function listMembers(actor: Actor, workspaceId: string) {
     .innerJoin(profiles, eq(profiles.id, workspaceMembers.userId))
     .where(eq(workspaceMembers.workspaceId, workspaceId))
     .orderBy(asc(profiles.displayName))
+}
+
+/**
+ * 워크스페이스의 첫 최상위 페이지 id.
+ * 로그인 직후 "/" 를 거치지 않고 바로 그 페이지로 보내기 위한 것이다
+ * ("/" 는 레이아웃(트리 조회)까지 렌더한 뒤 리다이렉트해서 왕복이 낭비된다).
+ */
+export async function getFirstPageId(workspaceId: string): Promise<string | null> {
+  const [row] = await db
+    .select({ id: pages.id })
+    .from(pages)
+    .where(and(
+      eq(pages.workspaceId, workspaceId),
+      isNull(pages.parentId),
+      eq(pages.isTrashed, false),
+      isNull(pages.collectionId),
+    ))
+    .orderBy(asc(pages.sortKey))
+    .limit(1)
+  return row?.id ?? null
 }
 
 export async function getWorkspace(actor: Actor, workspaceId: string) {
