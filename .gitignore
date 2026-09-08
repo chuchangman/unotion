@@ -49,3 +49,6 @@ next-env.d.ts
 
 # .env* 로 전부 무시하되 예제는 커밋한다
 !.env.example
+
+.vercel
+.env*
