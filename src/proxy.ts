@@ -61,6 +61,10 @@ export async function proxy(request: NextRequest) {
 export const config = {
   matcher: [
     // MCP 엔드포인트는 Bearer 토큰으로 자체 인증한다 — 쿠키 미들웨어 제외
-    '/((?!_next/static|_next/image|favicon.ico|mcp|api/mcp|.*\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+    // login/share 는 함수 호출 자체를 아끼려고 matcher 에서 뺀다.
+    // (본문에서 어차피 즉시 통과시키지만, 그래도 람다가 한 번 뜬다 —
+    //  실측 CDN 69ms vs proxy 통과 158ms)
+    // mcp 는 Bearer 토큰으로 자체 인증하므로 쿠키 미들웨어가 필요 없다.
+    '/((?!_next/static|_next/image|favicon.ico|login|share|mcp|api/mcp|.*\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
   ],
 }
