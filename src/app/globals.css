@@ -53,3 +53,10 @@ body {
     border-bottom-color: rgb(255 255 255 / 0.5);
   }
 }
+
+/* 우측 미리보기 패널 등장 */
+.peek-panel { animation: peek-in 180ms ease-out; }
+@keyframes peek-in {
+  from { transform: translateX(24px); opacity: 0.4; }
+  to   { transform: translateX(0);    opacity: 1; }
+}

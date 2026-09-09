@@ -11,6 +11,10 @@ import {
 } from '@blocknote/react'
 import { BlockNoteView } from '@blocknote/mantine'
 import { withCollaboration } from '@blocknote/core/yjs'
+import { BlockNoteSchema, defaultBlockSpecs } from '@blocknote/core'
+import { PageBoardBlock } from './PageBoardBlock'
+import { PAGE_BOARD_TYPE, serializeColumns } from '@/lib/page-board'
+import { LayoutGrid } from 'lucide-react'
 import '@blocknote/core/fonts/inter.css'
 import '@blocknote/mantine/style.css'
 
@@ -86,6 +90,14 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
   // provider 는 객체 전체가 아니라 awareness 만 넘긴다.
   const editor = useCreateBlockNote(
     withCollaboration({
+      /**
+       * 커스텀 블록을 추가할 때는 서버(lib/core/markdown.ts)도 같은 타입 이름과
+       * props 를 알아야 한다. 안 그러면 MCP get_page 가 ydoc 을 파싱할 때
+       * 이 블록을 잃는다. 공용 정의는 lib/page-board.ts 에 있다.
+       */
+      schema: BlockNoteSchema.create({
+        blockSpecs: { ...defaultBlockSpecs, [PAGE_BOARD_TYPE]: PageBoardBlock() },
+      }),
       collaboration: {
         fragment: doc.getXmlFragment('blocknote'),
         user: { name: user.name, color: colorFor(user.id) },
@@ -212,7 +224,39 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
         })()
       },
     },
-  ], [workspaceId, pageId, insertPageLink, router])
+    {
+      title: '페이지 보드',
+      subtext: '하위 페이지 목록을 좌우로 배치합니다',
+      aliases: ['board', 'column', '보드', '컬럼', '목록'],
+      group: '기본 블록',
+      icon: <LayoutGrid className="size-4" />,
+      onItemClick: () => {
+        void (async () => {
+          // 두 칸을 만들고 각 칸이 가리킬 하위 페이지를 함께 생성한다
+          const made = await Promise.all(
+            ['문서', '회의록'].map((title) =>
+              createLinkedChildPage({ workspaceId, parentId: pageId, title }),
+            ),
+          )
+          if (made.some((m) => !m.ok)) {
+            console.error('[editor] 페이지 보드 생성 실패')
+            return
+          }
+          const cols = made.map((m) => ({
+            pageId: (m as { ok: true; data: { id: string } }).data.id,
+            title: (m as { ok: true; data: { title: string } }).data.title,
+            width: 50,
+          }))
+          editor.insertBlocks(
+            [{ type: PAGE_BOARD_TYPE, props: { columns: serializeColumns(cols) } }],
+            editor.getTextCursorPosition().block,
+            'after',
+          )
+          router.refresh()
+        })()
+      },
+    },
+  ], [workspaceId, pageId, insertPageLink, router, editor])
 
   // 탭 닫힘 / 백그라운드 전환 시 마지막 저장
   const flush = useCallback(() => { void provider.flush() }, [provider])
@@ -231,17 +275,23 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
       <ConnectionBadge status={status} />
       {!ready && <p className="px-1 py-2 text-sm text-neutral-400">불러오는 중...</p>}
       {/**
-        * 내부 링크(/p/...)는 Next 라우터로 이동시킨다.
-        * 그냥 두면 전체 페이지가 새로고침돼 에디터와 소켓이 다시 뜬다.
+        * 내부 링크(/p/...)는 우측 미리보기 패널로 연다 (노션의 side peek).
+        * 전체 이동을 시키면 에디터와 실시간 소켓이 통째로 다시 뜨고,
+        * 보던 문서에서 맥락이 끊긴다.
+        * Ctrl/Cmd/Shift 클릭은 브라우저에 맡겨 새 탭으로 열리게 둔다.
         */}
       <div
+        data-workspace-id={workspaceId}
         onClick={(e) => {
           const a = (e.target as HTMLElement).closest?.('a')
           const href = a?.getAttribute('href')
           if (!href?.startsWith('/p/')) return
-          if (e.metaKey || e.ctrlKey || e.shiftKey) return // 새 탭은 브라우저에 맡긴다
+          if (e.metaKey || e.ctrlKey || e.shiftKey) return
           e.preventDefault()
-          router.push(href)
+          const target = href.slice('/p/'.length)
+          const qs = new URLSearchParams(window.location.search)
+          qs.set('peek', target)
+          router.push(`${window.location.pathname}?${qs}`, { scroll: false })
         }}
       >
         <BlockNoteView editor={editor} editable={canEdit} slashMenu={false}>

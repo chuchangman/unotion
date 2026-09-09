@@ -3,7 +3,7 @@
  *
  * 규칙: 모든 export 함수는 첫 인자로 Actor 를 받고, 가장 먼저 assert* 를 호출한다.
  */
-import { and, desc, eq, isNull, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm'
 import { generateKeyBetween } from 'fractional-indexing'
 import { db } from './db'
 import { pages, pageVersions } from './schema'
@@ -158,6 +158,23 @@ export async function searchPagesForLink(
     .limit(limit)
 
   return rows
+}
+
+/** 특정 페이지의 바로 아래 자식들. 페이지 보드 블록이 쓴다. */
+export async function listChildren(
+  actor: Actor,
+  parentId: string,
+): Promise<Array<{ id: string; title: string; icon: PageRow['icon'] }>> {
+  await assertCanRead(actor.userId, parentId)
+  return db
+    .select({ id: pages.id, title: pages.title, icon: pages.icon })
+    .from(pages)
+    .where(and(
+      eq(pages.parentId, parentId),
+      eq(pages.isTrashed, false),
+      isNull(pages.collectionId),
+    ))
+    .orderBy(asc(pages.sortKey))
 }
 
 /** "이번 주에 뭐 바뀌었어?" — MCP 에서 체감이 큰 툴 */

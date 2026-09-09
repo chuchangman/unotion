@@ -116,6 +116,36 @@ export async function trashPage(pageId: string): Promise<ActionResult<null>> {
   })
 }
 
+/** 우측 미리보기 패널이 페이지를 열 때 필요한 최소 정보 */
+export async function getPagePreview(pageId: string): Promise<ActionResult<{
+  id: string
+  title: string
+  icon: PageRow['icon']
+  canEdit: boolean
+}>> {
+  return run(async () => {
+    const actor = await requireActor()
+    const page = await Pages.getPage(actor, pageId)
+    const access = await Pages.resolvePageAccess(actor.userId, pageId, page)
+    return {
+      id: page.id,
+      title: page.title,
+      icon: page.icon,
+      canEdit: access?.level === 'edit' || access?.level === 'full',
+    }
+  })
+}
+
+/** 특정 페이지의 바로 아래 자식들 (페이지 보드 블록이 쓴다) */
+export async function listChildPages(parentId: string): Promise<ActionResult<
+  Array<{ id: string; title: string; icon: PageRow['icon'] }>
+>> {
+  return run(async () => {
+    const actor = await requireActor()
+    return Pages.listChildren(actor, parentId)
+  })
+}
+
 /** 본문에서 @ 로 페이지를 링크할 때 쓰는 검색 (아이콘 포함) */
 export async function searchPagesForLink(
   workspaceId: string,

@@ -4,6 +4,8 @@ import { getPage, resolvePageAccess } from '@/lib/core/pages'
 import { DomainError } from '@/lib/core/errors'
 import { PageHeader } from '@/components/editor/PageHeader'
 import { EditorLoader } from '@/components/editor/EditorLoader'
+import { PeekPanel } from '@/components/editor/PeekPanel'
+import { Suspense } from 'react'
 
 export default async function PageView({
   params,
@@ -34,6 +36,12 @@ export default async function PageView({
           user={{ id: actor.userId, name: displayName }}
           canEdit={canEdit}
         />
+        <Suspense fallback={null}>
+          <PeekPanel
+            workspaceId={workspace.id}
+            user={{ id: actor.userId, name: displayName }}
+          />
+        </Suspense>
       </article>
     )
   } catch (err) {

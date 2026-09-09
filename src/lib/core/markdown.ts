@@ -15,8 +15,19 @@ import type { ServerBlockNoteEditor } from '@blocknote/server-util'
 /** Editor.tsx 의 doc.getXmlFragment('blocknote') 와 반드시 같아야 한다 */
 export const FRAGMENT = 'blocknote'
 
-type Editor = ReturnType<typeof ServerBlockNoteEditor.create>
+/**
+ * 커스텀 스키마를 넘기면 ServerBlockNoteEditor 의 제네릭이 그 스키마로 좁혀진다.
+ * 이 파일은 변환(마크다운 <-> 블록 <-> ydoc)만 하고 블록 타입을 직접 다루지 않으므로
+ * 캐시는 느슨한 타입으로 들고 있는다.
+ */
+type Editor = Awaited<ReturnType<typeof makeEditor>>
 let cached: Editor | null = null
+
+async function makeEditor() {
+  const { ServerBlockNoteEditor: E } = await import('@blocknote/server-util')
+  const { serverSchema } = await import('./server-schema')
+  return E.create({ schema: serverSchema })
+}
 
 /**
  * 지연 import 가 필수다.
@@ -26,10 +37,8 @@ let cached: Editor | null = null
  * 생성 비용이 있으므로 한 번 만들고 요청 간 재사용한다.
  */
 async function editor(): Promise<Editor> {
-  if (!cached) {
-    const { ServerBlockNoteEditor: E } = await import('@blocknote/server-util')
-    cached = E.create()
-  }
+  // 클라이언트와 같은 스키마를 써야 커스텀 블록(pageBoard)이 유실되지 않는다
+  cached ??= await makeEditor()
   return cached
 }
 
