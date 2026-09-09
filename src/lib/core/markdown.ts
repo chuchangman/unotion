@@ -130,6 +130,33 @@ export type ApplyResult = {
  * 결과적으로 이 연산은 문서 전체를 갈아끼우는 굵은 CRDT 변경이라,
  * 같은 시점에 사람이 편집 중이었다면 MCP 쪽이 이긴다. 의도된 트레이드오프다.
  */
+/**
+ * 저장해 둔 블록 배열을 그대로 ydoc 에 적용한다.
+ *
+ * 버전 되돌리기가 쓴다. 마크다운을 거치지 않는 것이 핵심이다 —
+ * 블록 → 마크다운 → 블록 왕복은 표·페이지보드 같은 블록을 뭉개므로,
+ * 스냅샷을 원래 모습대로 되돌리려면 블록을 직접 넣어야 한다.
+ */
+export async function applyBlocks(
+  current: Buffer | Uint8Array | null,
+  blocks: unknown,
+): Promise<ApplyResult> {
+  const ed = await editor()
+  const doc = new Y.Doc()
+  if (current && current.byteLength > 0) {
+    Y.applyUpdate(doc, new Uint8Array(current))
+  }
+
+  const beforeSV = Y.encodeStateVector(doc)
+  ed.blocksToYXmlFragment(blocks as never, doc.getXmlFragment(FRAGMENT))
+
+  return {
+    ydoc: Buffer.from(Y.encodeStateAsUpdate(doc)),
+    blocks: ed.yDocToBlocks(doc, FRAGMENT),
+    delta: Y.encodeStateAsUpdate(doc, beforeSV),
+  }
+}
+
 export async function applyMarkdown(
   current: Buffer | Uint8Array | null,
   markdown: string,

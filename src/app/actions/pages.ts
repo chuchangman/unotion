@@ -121,6 +121,70 @@ export async function trashPage(pageId: string): Promise<ActionResult<null>> {
   })
 }
 
+// ─────────────────────────────────── 버전 기록
+
+export async function listVersions(
+  pageId: string,
+): Promise<ActionResult<Pages.PageVersionMeta[]>> {
+  return run(async () => {
+    const actor = await requireActor()
+    return Pages.listVersions(actor, pageId)
+  })
+}
+
+/**
+ * 에디터가 저장 직전에 부른다. 간격이 짧으면 서버가 알아서 건너뛴다.
+ * 저장 자체를 막지 않도록 실패해도 조용히 넘어간다 — 호출부에서 결과를 무시한다.
+ */
+export async function snapshotVersion(pageId: string): Promise<ActionResult<boolean>> {
+  return run(async () => {
+    const actor = await requireActor()
+    return Pages.snapshotVersionIfStale(actor, pageId)
+  })
+}
+
+export async function restoreVersion(
+  pageId: string,
+  versionId: string,
+): Promise<ActionResult<null>> {
+  return run(async () => {
+    const actor = await requireActor()
+    await Pages.restoreVersion(actor, pageId, versionId)
+    revalidatePath('/', 'layout')
+    return null
+  })
+}
+
+// ─────────────────────────────────── 휴지통
+
+export async function listTrashed(
+  workspaceId: string,
+): Promise<ActionResult<Pages.TrashedPage[]>> {
+  return run(async () => {
+    const actor = await requireActor()
+    return Pages.listTrashed(actor, workspaceId)
+  })
+}
+
+export async function restorePage(pageId: string): Promise<ActionResult<null>> {
+  return run(async () => {
+    const actor = await requireActor()
+    await Pages.restorePage(actor, pageId)
+    // 사이드바 트리에 다시 나타나야 한다
+    revalidatePath('/', 'layout')
+    return null
+  })
+}
+
+export async function deletePagePermanently(pageId: string): Promise<ActionResult<null>> {
+  return run(async () => {
+    const actor = await requireActor()
+    await Pages.deletePagePermanently(actor, pageId)
+    revalidatePath('/', 'layout')
+    return null
+  })
+}
+
 /** 우측 미리보기 패널이 페이지를 열 때 필요한 최소 정보 */
 export async function getPagePreview(pageId: string): Promise<ActionResult<{
   id: string
@@ -201,5 +265,23 @@ export async function searchPages(
   return run(async () => {
     const actor = await requireActor()
     return Pages.searchPages(actor, workspaceId, query)
+  })
+}
+
+/**
+ * 검색창을 막 열었을 때(검색어가 없을 때) 보여줄 최근 문서.
+ * 빈 화면보다 낫다 — 실제로 찾는 문서의 상당수가 방금 보던 것이다.
+ *
+ * getRecentChanges 를 그대로 쓴다. "언제부터"가 아니라 "최근 N개"가 필요하므로
+ * 시작점은 epoch 로 두고 정렬(updated_at DESC)과 limit 에 맡긴다.
+ */
+export async function recentPages(
+  workspaceId: string,
+  limit = 8,
+): Promise<ActionResult<Array<{ id: string; title: string }>>> {
+  return run(async () => {
+    const actor = await requireActor()
+    const rows = await Pages.getRecentChanges(actor, workspaceId, new Date(0), limit)
+    return rows.map((r) => ({ id: r.id, title: r.title || '제목 없음' }))
   })
 }
