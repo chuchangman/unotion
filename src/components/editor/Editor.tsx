@@ -3,7 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as Y from 'yjs'
 import { IndexeddbPersistence } from 'y-indexeddb'
-import { useCreateBlockNote } from '@blocknote/react'
+import {
+  useCreateBlockNote,
+  SuggestionMenuController,
+  getDefaultReactSlashMenuItems,
+  type DefaultReactSuggestionItem,
+} from '@blocknote/react'
 import { BlockNoteView } from '@blocknote/mantine'
 import { withCollaboration } from '@blocknote/core/yjs'
 import '@blocknote/core/fonts/inter.css'
@@ -13,7 +18,10 @@ import { createClient } from '@/lib/supabase/client'
 import { SupabaseYjsProvider, type ProviderStatus } from '@/lib/realtime/supabase-yjs-provider'
 import { blocksToPlainText } from '@/lib/blocks'
 import { bytesToBase64, base64ToBytes } from '@/lib/base64'
-import { loadYdoc, savePage } from '@/app/actions/pages'
+import { loadYdoc, savePage, searchPagesForLink, createLinkedChildPage } from '@/app/actions/pages'
+import { filterSuggestionItems } from '@blocknote/core/extensions'
+import { FileText, FilePlus } from 'lucide-react'
+import { useRouter } from 'next/navigation'
 
 const USER_COLORS = ['#ef4444', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ec4899']
 
@@ -25,12 +33,14 @@ function colorFor(id: string) {
 
 export type EditorProps = {
   pageId: string
+  workspaceId: string
   title: string
   user: { id: string; name: string }
   canEdit: boolean
 }
 
-export function Editor({ pageId, title, user, canEdit }: EditorProps) {
+export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProps) {
+  const router = useRouter()
   const [status, setStatus] = useState<ProviderStatus>('connecting')
   const [ready, setReady] = useState(false)
 
@@ -115,6 +125,95 @@ export function Editor({ pageId, title, user, canEdit }: EditorProps) {
     }
   }, [provider])
 
+  /**
+   * 페이지 링크 삽입.
+   * 커스텀 인라인 노드가 아니라 **기본 link** 를 쓴다 — 스키마가 그대로라
+   * 서버(MCP get_page)와 기존 문서가 영향을 받지 않고,
+   * 마크다운으로도 [📄 제목](/p/id) 로 자연스럽게 나간다.
+   * 대가: 원본 제목이 바뀌어도 링크 텍스트는 따라가지 않는다.
+   */
+  const insertPageLink = useCallback(
+    (page: { id: string; title: string; icon: { type: string; value: string } | null }) => {
+      const emoji = page.icon?.type === 'emoji' ? `${page.icon.value} ` : '📄 '
+      editor.insertInlineContent([
+        {
+          type: 'link',
+          href: `/p/${page.id}`,
+          content: `${emoji}${page.title || '제목 없음'}`,
+        },
+        ' ',
+      ])
+    },
+    [editor],
+  )
+
+  /** @ 를 눌렀을 때 뜨는 페이지 목록 */
+  const getPageMentions = useCallback(
+    async (query: string): Promise<DefaultReactSuggestionItem[]> => {
+      const res = await searchPagesForLink(workspaceId, query)
+      const items: DefaultReactSuggestionItem[] = res.ok
+        ? res.data
+            .filter((pg) => pg.id !== pageId) // 자기 자신은 제외
+            .map((pg) => ({
+              title: pg.title || '제목 없음',
+              icon: pg.icon?.type === 'emoji'
+                ? <span className="text-base leading-none">{pg.icon.value}</span>
+                : <FileText className="size-4" />,
+              group: '페이지 링크',
+              onItemClick: () => insertPageLink(pg),
+            }))
+        : []
+
+      // 검색 결과가 없으면 그 이름으로 하위 페이지를 만든다
+      if (query.trim()) {
+        items.push({
+          title: `"${query}" 하위 페이지 만들기`,
+          icon: <FilePlus className="size-4" />,
+          group: '새로 만들기',
+          onItemClick: () => {
+            void (async () => {
+              const created = await createLinkedChildPage({
+                workspaceId, parentId: pageId, title: query.trim(),
+              })
+              if (created.ok) {
+                insertPageLink(created.data)
+                router.refresh() // 사이드바 트리 갱신
+              } else {
+                console.error('[editor] 하위 페이지 생성 실패', created.message)
+              }
+            })()
+          },
+        })
+      }
+      return items
+    },
+    [workspaceId, pageId, insertPageLink, router],
+  )
+
+  /** 슬래시 메뉴에 추가할 항목 */
+  const pageMenuItems: DefaultReactSuggestionItem[] = useMemo(() => [
+    {
+      title: '하위 페이지',
+      subtext: '새 페이지를 만들고 여기에 링크합니다',
+      aliases: ['page', 'subpage', '페이지', 'ㅍㅔ이지'],
+      group: '기본 블록',
+      icon: <FilePlus className="size-4" />,
+      onItemClick: () => {
+        void (async () => {
+          const created = await createLinkedChildPage({
+            workspaceId, parentId: pageId, title: '제목 없음',
+          })
+          if (created.ok) {
+            insertPageLink(created.data)
+            router.refresh()
+          } else {
+            console.error('[editor] 하위 페이지 생성 실패', created.message)
+          }
+        })()
+      },
+    },
+  ], [workspaceId, pageId, insertPageLink, router])
+
   // 탭 닫힘 / 백그라운드 전환 시 마지막 저장
   const flush = useCallback(() => { void provider.flush() }, [provider])
   useEffect(() => {
@@ -131,7 +230,39 @@ export function Editor({ pageId, title, user, canEdit }: EditorProps) {
     <div className="relative">
       <ConnectionBadge status={status} />
       {!ready && <p className="px-1 py-2 text-sm text-neutral-400">불러오는 중...</p>}
-      <BlockNoteView editor={editor} editable={canEdit} />
+      {/**
+        * 내부 링크(/p/...)는 Next 라우터로 이동시킨다.
+        * 그냥 두면 전체 페이지가 새로고침돼 에디터와 소켓이 다시 뜬다.
+        */}
+      <div
+        onClick={(e) => {
+          const a = (e.target as HTMLElement).closest?.('a')
+          const href = a?.getAttribute('href')
+          if (!href?.startsWith('/p/')) return
+          if (e.metaKey || e.ctrlKey || e.shiftKey) return // 새 탭은 브라우저에 맡긴다
+          e.preventDefault()
+          router.push(href)
+        }}
+      >
+        <BlockNoteView editor={editor} editable={canEdit} slashMenu={false}>
+          {/* 슬래시 메뉴 — 기본 항목 + 하위 페이지 */}
+          <SuggestionMenuController
+            triggerCharacter="/"
+            getItems={async (query) =>
+              filterSuggestionItems(
+                [...getDefaultReactSlashMenuItems(editor), ...pageMenuItems],
+                query,
+              )
+            }
+          />
+          {/* @ 로 페이지 링크 */}
+          <SuggestionMenuController
+            triggerCharacter="@"
+            minQueryLength={0}
+            getItems={getPageMentions}
+          />
+        </BlockNoteView>
+      </div>
     </div>
   )
 }

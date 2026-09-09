@@ -11,7 +11,7 @@ export default async function PageView({
   params: Promise<{ pageId: string }>
 }) {
   const { pageId } = await params
-  const { actor, displayName } = await requireSessionContext()
+  const { actor, workspace, displayName } = await requireSessionContext()
 
   try {
     const page = await getPage(actor, pageId)
@@ -29,6 +29,7 @@ export default async function PageView({
         />
         <EditorLoader
           pageId={page.id}
+          workspaceId={workspace.id}
           title={page.title}
           user={{ id: actor.userId, name: displayName }}
           canEdit={canEdit}

@@ -3,6 +3,7 @@
 import { revalidatePath } from 'next/cache'
 import { requireActor } from '@/lib/auth'
 import * as Pages from '@/lib/core/pages'
+import type { PageRow } from '@/lib/core/pages'
 import { DomainError } from '@/lib/core/errors'
 
 /**
@@ -112,6 +113,39 @@ export async function trashPage(pageId: string): Promise<ActionResult<null>> {
     await Pages.trashPage(actor, pageId)
     revalidatePath('/', 'layout')
     return null
+  })
+}
+
+/** 본문에서 @ 로 페이지를 링크할 때 쓰는 검색 (아이콘 포함) */
+export async function searchPagesForLink(
+  workspaceId: string,
+  query: string,
+): Promise<ActionResult<Array<{ id: string; title: string; icon: PageRow['icon'] }>>> {
+  return run(async () => {
+    const actor = await requireActor()
+    return Pages.searchPagesForLink(actor, workspaceId, query)
+  })
+}
+
+/**
+ * 본문에서 바로 하위 페이지를 만든다.
+ * 링크에 넣을 정보(제목·아이콘)를 그대로 돌려준다.
+ */
+export async function createLinkedChildPage(input: {
+  workspaceId: string
+  parentId: string
+  title: string
+}): Promise<ActionResult<{ id: string; title: string; icon: PageRow['icon'] }>> {
+  return run(async () => {
+    const actor = await requireActor()
+    const page = await Pages.createPage(actor, {
+      workspaceId: input.workspaceId,
+      parentId: input.parentId,
+      title: input.title,
+      icon: { type: 'emoji', value: '📄' },
+    })
+    revalidatePath('/', 'layout')
+    return { id: page.id, title: page.title, icon: page.icon }
   })
 }
 

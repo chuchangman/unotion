@@ -132,6 +132,34 @@ export async function searchPages(
   }))
 }
 
+/**
+ * 본문에서 페이지를 링크할 때 쓰는 검색.
+ * 아이콘이 필요하고(링크 앞에 붙는다) 발췌는 필요 없어서 searchPages 와 따로 둔다.
+ */
+export async function searchPagesForLink(
+  actor: Actor,
+  workspaceId: string,
+  query: string,
+  limit = 8,
+): Promise<Array<{ id: string; title: string; icon: PageRow['icon'] }>> {
+  await assertWorkspaceMember(actor.userId, workspaceId)
+
+  const like = `%${query}%`
+  const rows = await db
+    .select({ id: pages.id, title: pages.title, icon: pages.icon })
+    .from(pages)
+    .where(and(
+      eq(pages.workspaceId, workspaceId),
+      eq(pages.isTrashed, false),
+      isNull(pages.collectionId),
+      query.trim() ? sql`${pages.title} ILIKE ${like}` : sql`true`,
+    ))
+    .orderBy(desc(pages.updatedAt))
+    .limit(limit)
+
+  return rows
+}
+
 /** "이번 주에 뭐 바뀌었어?" — MCP 에서 체감이 큰 툴 */
 export async function getRecentChanges(
   actor: Actor,
