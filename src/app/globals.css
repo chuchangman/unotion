@@ -60,3 +60,48 @@ body {
   from { transform: translateX(24px); opacity: 0.4; }
   to   { transform: translateX(0);    opacity: 1; }
 }
+
+/*
+ * 웹 공개 페이지(/share/[slug])의 본문 스타일.
+ *
+ * 이 화면은 서버가 만든 평범한 HTML(h1/p/ul/table…)을 그대로 그린다.
+ * 에디터 번들을 싣지 않는 게 요점이라 BlockNote/Mantine CSS 를 쓸 수 없어서,
+ * 읽을 만한 최소한의 타이포그래피만 여기에 둔다.
+ * 선택자는 전부 .public-body 안으로 한정한다 — 앱 화면에 새면 안 된다.
+ */
+.public-body { line-height: 1.75; }
+.public-body > * + * { margin-top: 0.9em; }
+.public-body h1 { font-size: 1.75rem; font-weight: 700; margin-top: 1.8em; }
+.public-body h2 { font-size: 1.4rem; font-weight: 700; margin-top: 1.6em; }
+.public-body h3 { font-size: 1.15rem; font-weight: 600; margin-top: 1.4em; }
+.public-body ul { list-style: disc; padding-left: 1.4em; }
+.public-body ol { list-style: decimal; padding-left: 1.4em; }
+.public-body li + li { margin-top: 0.25em; }
+.public-body a { text-decoration: underline; text-underline-offset: 2px; }
+.public-body code {
+  font-size: 0.9em;
+  padding: 0.1em 0.35em;
+  border-radius: 0.25rem;
+  background: color-mix(in oklab, currentColor 10%, transparent);
+}
+.public-body pre {
+  padding: 0.9em 1em;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+  background: color-mix(in oklab, currentColor 8%, transparent);
+}
+.public-body pre code { background: none; padding: 0; }
+.public-body blockquote {
+  padding-left: 1em;
+  border-left: 3px solid color-mix(in oklab, currentColor 25%, transparent);
+  color: color-mix(in oklab, currentColor 70%, transparent);
+}
+.public-body img { border-radius: 0.5rem; }
+/* 넓은 표가 화면 밖으로 나가지 않게 가로 스크롤을 준다 */
+.public-body table { display: block; overflow-x: auto; border-collapse: collapse; }
+.public-body th, .public-body td {
+  border: 1px solid color-mix(in oklab, currentColor 20%, transparent);
+  padding: 0.4em 0.7em;
+  text-align: left;
+}
+.public-body th { font-weight: 600; }

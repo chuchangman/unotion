@@ -8,10 +8,11 @@
  * 건 것인지. 그게 안 보이면 권한을 바꿔도 왜 안 바뀌는지 알 수 없다.
  */
 import { useState, useTransition } from 'react'
-import { Share2, X } from 'lucide-react'
+import { Check, Copy, Globe, Share2, X } from 'lucide-react'
 import * as Actions from '@/app/actions/sharing'
 import type { PermissionLevel } from '@/lib/core/schema'
 import type { SharingEntry } from '@/lib/core/sharing'
+import type { PublicShare } from '@/lib/core/public-share'
 
 const LABEL: Record<PermissionLevel, string> = {
   read: '읽기',
@@ -26,6 +27,8 @@ const INHERIT = '__inherit__'
 export function SharePanel({ pageId }: { pageId: string }) {
   const [open, setOpen] = useState(false)
   const [entries, setEntries] = useState<SharingEntry[] | null>(null)
+  const [share, setShare] = useState<PublicShare | null | undefined>(undefined)
+  const [copied, setCopied] = useState(false)
   const [error, setError] = useState('')
   const [, start] = useTransition()
 
@@ -33,10 +36,32 @@ export function SharePanel({ pageId }: { pageId: string }) {
     start(async () => {
       setOpen(true)
       setError('')
-      const res = await Actions.getPageSharing(pageId)
-      if (res.ok) setEntries(res.data.entries)
+      // 멤버 권한과 공개 링크 상태를 함께 읽는다
+      const [perm, pub] = await Promise.all([
+        Actions.getPageSharing(pageId),
+        Actions.getPublicShare(pageId),
+      ])
+      if (perm.ok) setEntries(perm.data.entries)
+      else setError(perm.message)
+      if (pub.ok) setShare(pub.data)
+    })
+
+  const publish = () =>
+    start(async () => {
+      const res = await Actions.createPublicShare(pageId)
+      if (res.ok) setShare(res.data)
       else setError(res.message)
     })
+
+  const unpublish = () =>
+    start(async () => {
+      if (!confirm('공개 링크를 없앨까요? 이미 나눠준 링크는 즉시 열리지 않습니다.')) return
+      const res = await Actions.revokePublicShare(pageId)
+      if (res.ok) setShare(null)
+      else setError(res.message)
+    })
+
+  const shareUrl = share ? `${window.location.origin}/share/${share.slug}` : ''
 
   const change = (entry: SharingEntry, value: string) =>
     start(async () => {
@@ -129,6 +154,59 @@ export function SharePanel({ pageId }: { pageId: string }) {
                   ))}
                 </ul>
               )}
+            </div>
+
+            <div className="border-t border-neutral-200 p-3 dark:border-neutral-800">
+              <div className="flex items-center gap-2">
+                <Globe className="size-4 shrink-0 text-neutral-400" />
+                <span className="text-sm font-medium">웹에 공개</span>
+                {share !== undefined && (
+                  <button
+                    type="button"
+                    onClick={share ? unpublish : publish}
+                    className={
+                      'ml-auto rounded-md px-2.5 py-1 text-xs font-medium ' +
+                      (share
+                        ? 'text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40'
+                        : 'bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900')
+                    }
+                  >
+                    {share ? '공개 중지' : '공개'}
+                  </button>
+                )}
+              </div>
+
+              {share && (
+                <div className="mt-2 flex items-start gap-1">
+                  <input
+                    readOnly
+                    value={shareUrl}
+                    aria-label="공개 링크"
+                    onFocus={(e) => e.currentTarget.select()}
+                    className="min-w-0 flex-1 rounded border border-neutral-200 bg-transparent px-2 py-1 text-[11px] dark:border-neutral-700"
+                  />
+                  <button
+                    type="button"
+                    aria-label="링크 복사"
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(shareUrl)
+                        setCopied(true)
+                        setTimeout(() => setCopied(false), 2000)
+                      } catch { setCopied(false) }
+                    }}
+                    className="shrink-0 rounded border border-neutral-200 p-1.5 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
+                  >
+                    {copied ? <Check className="size-3.5 text-green-600" /> : <Copy className="size-3.5" />}
+                  </button>
+                </div>
+              )}
+
+              <p className="mt-2 text-[11px] text-neutral-400">
+                {share
+                  ? '링크를 아는 사람은 로그인 없이 이 페이지를 읽을 수 있습니다. 하위 페이지는 공개되지 않습니다.'
+                  : '공개하면 링크를 아는 사람은 로그인 없이 읽을 수 있습니다. 검색엔진 색인은 기본으로 막습니다.'}
+              </p>
             </div>
 
             <p className="border-t border-neutral-200 px-4 py-2 text-[11px] text-neutral-400 dark:border-neutral-800">
