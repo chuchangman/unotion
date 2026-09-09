@@ -240,11 +240,65 @@ export function registerTools(server: McpServer) {
   )
 
   server.registerTool(
+    'edit_page',
+    {
+      title: '페이지 부분 수정',
+      description: [
+        '문서의 일부만 고친다. **본문을 고칠 때는 이걸 먼저 쓸 것.**',
+        '',
+        'get_page 로 읽은 본문에서 바꿀 부분을 그대로 복사해 old_text 에 넣고,',
+        '새 내용을 new_text 에 넣는다. 나머지는 건드리지 않는다.',
+        '',
+        '- old_text 는 문서에 **정확히 한 번만** 나타나야 한다.',
+        '  여러 곳이면 앞뒤 줄을 더 포함해 유일하게 만들거나 replace_all 을 켠다.',
+        '- 공백과 줄바꿈까지 그대로 맞춰야 한다.',
+        '- new_text 를 빈 문자열로 주면 그 부분이 삭제된다.',
+        '',
+        '문서 끝에 덧붙이기만 할 거면 update_page 의 append 가 더 간단하다.',
+      ].join('\n'),
+      inputSchema: {
+        page_id: z.string().uuid().describe('페이지 UUID'),
+        old_text: z.string().min(1).describe('바꿀 기존 텍스트 (본문에 있는 그대로)'),
+        new_text: z.string().describe('새 텍스트. 빈 문자열이면 삭제'),
+        replace_all: z.boolean().optional().describe('같은 텍스트를 모두 바꿀 때만 true'),
+      },
+      annotations: { readOnlyHint: false },
+    },
+    wrap(async ({ page_id, old_text, new_text, replace_all }, actor) => {
+      const page = await Pages.getPage(actor, page_id)
+
+      let edited
+      try {
+        edited = await Md.editMarkdown(page.ydoc, old_text, new_text, replace_all ?? false)
+      } catch (err) {
+        if (err instanceof Md.EditMatchError) return fail(err.message)
+        throw err
+      }
+
+      const applied = await Md.applyMarkdown(page.ydoc, edited.markdown, 'replace')
+      await Pages.savePageContent(actor, page_id, {
+        ydoc: applied.ydoc,
+        contentJson: applied.blocks,
+        plainText: await Md.blocksToMarkdown(applied.blocks),
+        title: page.title,
+      })
+
+      return text(
+        [
+          `**${page.title || '제목 없음'}** 에서 ${edited.count}군데를 고쳤습니다.`,
+          '',
+          `링크: ${pageUrl(page_id)}`,
+        ].join('\n'),
+      )
+    }),
+  )
+
+  server.registerTool(
     'update_page',
     {
       title: '페이지 수정',
       description:
-        '페이지 본문을 마크다운으로 수정한다.\n' +
+        '페이지 본문에 내용을 덧붙이거나 전체를 갈아끼운다. **일부만 고치려면 edit_page 를 쓸 것** — 여기서 replace 모드는 본문 전체를 다시 써야 하고, 그 과정에서 손대지 않으려던 부분까지 바뀔 수 있다.' +
         '- mode="append" (기본): 기존 내용 뒤에 덧붙인다. 회의록 추가 등 가장 안전하고 자주 쓰인다.\n' +
         '- mode="prepend": 앞에 붙인다.\n' +
         '- mode="replace": 본문 전체를 갈아끼운다. 되돌릴 수 없으니 사용자가 명확히 요청했을 때만.\n' +

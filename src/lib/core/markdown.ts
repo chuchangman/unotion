@@ -66,6 +66,53 @@ export async function ydocBytesToMarkdown(bytes: Buffer | Uint8Array | null) {
   return blocks.length ? blocksToMarkdown(blocks) : ''
 }
 
+export class EditMatchError extends Error {
+  constructor(message: string, readonly kind: 'not_found' | 'ambiguous') {
+    super(message)
+    this.name = 'EditMatchError'
+  }
+}
+
+/**
+ * 문서 일부만 고친다 (파일 편집 도구와 같은 방식).
+ *
+ * 전에는 replace 로 전체를 다시 쓰는 길밖에 없어서, 한 문단을 고치려 해도
+ * 문서 전체를 재생성해야 했다. 토큰이 낭비되고 재생성 과정에서 손대지 않은
+ * 부분까지 바뀔 위험이 있었다.
+ *
+ * 내부적으로는 여전히 마크다운 전체를 다시 파싱하지만, Yjs 가 diff 를 내므로
+ * CRDT 상으로는 바뀐 블록만 갱신된다 (실측: 전체 948B 중 증분 236B).
+ */
+export async function editMarkdown(
+  current: Buffer | Uint8Array | null,
+  oldText: string,
+  newText: string,
+  replaceAll = false,
+): Promise<{ markdown: string; count: number }> {
+  const md = await ydocBytesToMarkdown(current)
+
+  if (!oldText) throw new EditMatchError('찾을 텍스트가 비어 있습니다', 'not_found')
+
+  const occurrences = md.split(oldText).length - 1
+  if (occurrences === 0) {
+    throw new EditMatchError(
+      '문서에서 그 텍스트를 찾지 못했습니다. get_page 로 현재 본문을 다시 읽고, ' +
+      '공백과 줄바꿈까지 그대로 복사해서 넘기세요.',
+      'not_found',
+    )
+  }
+  if (occurrences > 1 && !replaceAll) {
+    throw new EditMatchError(
+      `그 텍스트가 ${occurrences}군데 있습니다. 앞뒤 줄을 더 포함해 유일하게 만들거나, ` +
+      'replace_all 을 켜세요.',
+      'ambiguous',
+    )
+  }
+
+  const markdown = replaceAll ? md.split(oldText).join(newText) : md.replace(oldText, newText)
+  return { markdown, count: replaceAll ? occurrences : 1 }
+}
+
 export type ApplyResult = {
   /** 저장할 전체 ydoc 상태 */
   ydoc: Buffer
