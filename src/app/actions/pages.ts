@@ -38,15 +38,20 @@ export async function loadYdoc(pageId: string): Promise<ActionResult<string | nu
   })
 }
 
+/**
+ * 에디터 자동저장.
+ *
+ * ydoc 만 보낸다. content_json 은 읽는 곳이 없는데도 같이 실려 보내지면서
+ * 큰 문서의 저장 페이로드를 두 배로 만들고 있었다.
+ */
 export async function savePage(
   pageId: string,
-  input: { ydocB64: string; contentJson: unknown; plainText: string; title: string },
+  input: { ydocB64: string; plainText: string; title: string },
 ): Promise<ActionResult<null>> {
   return run(async () => {
     const actor = await requireActor()
     await Pages.savePageContent(actor, pageId, {
       ydoc: Buffer.from(input.ydocB64, 'base64'),
-      contentJson: input.contentJson,
       plainText: input.plainText,
       title: input.title,
     })
@@ -143,6 +148,16 @@ export async function listChildPages(parentId: string): Promise<ActionResult<
   return run(async () => {
     const actor = await requireActor()
     return Pages.listChildren(actor, parentId)
+  })
+}
+
+/** 페이지 보드가 모든 칸의 목록을 한 번에 가져온다 */
+export async function listChildPagesBatch(parentIds: string[]): Promise<ActionResult<
+  Record<string, Array<{ id: string; title: string; icon: PageRow['icon'] }>>
+>> {
+  return run(async () => {
+    const actor = await requireActor()
+    return Pages.listChildrenBatch(actor, parentIds)
   })
 }
 

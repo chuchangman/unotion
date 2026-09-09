@@ -11,7 +11,7 @@ import {
   serializeColumns,
   type BoardColumn,
 } from '@/lib/page-board'
-import { listChildPages, createLinkedChildPage } from '@/app/actions/pages'
+import { listChildPagesBatch, createLinkedChildPage } from '@/app/actions/pages'
 
 type Child = { id: string; title: string; icon: { type: 'emoji' | 'url'; value: string } | null }
 
@@ -25,24 +25,21 @@ function Icon({ icon }: { icon: Child['icon'] }) {
 /** 보드 한 칸: 제목 + 하위 페이지 목록 + 새 페이지 버튼 */
 function BoardColumnView({
   column,
+  children,
   workspaceId,
   editable,
   onOpen,
+  onChanged,
 }: {
   column: BoardColumn
+  /** null 이면 아직 로딩 중 */
+  children: Child[] | null
   workspaceId: string
   editable: boolean
   onOpen: (pageId: string) => void
+  onChanged: () => void
 }) {
-  const [children, setChildren] = useState<Child[] | null>(null)
   const [busy, setBusy] = useState(false)
-
-  const reload = useCallback(async () => {
-    const res = await listChildPages(column.pageId)
-    setChildren(res.ok ? res.data : [])
-  }, [column.pageId])
-
-  useEffect(() => { void reload() }, [reload])
 
   const addPage = async () => {
     if (!workspaceId) return
@@ -54,7 +51,7 @@ function BoardColumnView({
     })
     setBusy(false)
     if (res.ok) {
-      await reload()
+      onChanged()
       onOpen(res.data.id)
     } else {
       console.error('[board] 페이지 생성 실패', res.message)
@@ -142,6 +139,26 @@ export const PageBoardBlock = createReactBlockSpec(
       const columns = parseColumns(block.props.columns)
       const editable = editor.isEditable
 
+      /**
+       * 모든 칸의 목록을 한 번에 가져온다.
+       * 칸마다 부르면 칸 수만큼 왕복이 생긴다.
+       * key 는 pageId 목록이라 폭을 드래그해도 다시 조회하지 않는다.
+       */
+      const parentKey = columns.map((c) => c.pageId).join(',')
+      const [lists, setLists] = useState<Record<string, Child[]> | null>(null)
+      const [reloadTick, setReloadTick] = useState(0)
+
+      useEffect(() => {
+        if (!parentKey) return
+        let cancelled = false
+        void listChildPagesBatch(parentKey.split(',')).then((res) => {
+          if (!cancelled) setLists(res.ok ? res.data : {})
+        })
+        return () => { cancelled = true }
+      }, [parentKey, reloadTick])
+
+      const reload = useCallback(() => setReloadTick((t) => t + 1), [])
+
       const open = (pageId: string) => {
         const qs = new URLSearchParams(window.location.search)
         qs.set('peek', pageId)
@@ -197,9 +214,11 @@ export const PageBoardBlock = createReactBlockSpec(
               <div className="min-w-0 flex-1">
                 <BoardColumnView
                   column={col}
+                  children={lists ? (lists[col.pageId] ?? []) : null}
                   workspaceId={workspaceId}
                   editable={editable}
                   onOpen={open}
+                  onChanged={reload}
                 />
               </div>
 

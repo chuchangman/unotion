@@ -7,6 +7,7 @@
  *
  * 조상은 pages.path 문자열('/rootId/childId/')에서 파싱한다 — 추가 쿼리가 없다.
  */
+import { cache } from 'react'
 import { and, eq, inArray } from 'drizzle-orm'
 import { db } from './db'
 import { pages, pagePermissions, workspaceMembers } from './schema'
@@ -25,7 +26,18 @@ const ROLE_DEFAULT: Record<WorkspaceRole, PermissionLevel | null> = {
   guest: null, // 게스트는 명시적으로 공유된 페이지만 본다
 }
 
-export async function getWorkspaceRole(
+/**
+ * ★ 요청 단위 캐시.
+ *
+ * 권한 검사는 거의 모든 core 함수의 첫 줄이라, 한 요청 안에서 같은
+ * (userId, workspaceId) 조회가 여러 번 일어난다. 페이지 보드가 두 칸이면
+ * 목록 조회만으로도 이 쿼리가 네 번 나갔다.
+ *
+ * React 의 cache() 는 요청 스코프 메모이제이션이라 요청이 끝나면 사라진다.
+ * lib/core 는 원래 프레임워크를 몰라야 하지만, 이건 서버 실행 환경(웹/MCP 모두
+ * React 서버 런타임)에서만 의미가 있고 동작도 동일해서 예외로 둔다.
+ */
+export const getWorkspaceRole = cache(async function getWorkspaceRole(
   userId: string,
   workspaceId: string,
 ): Promise<WorkspaceRole | null> {
@@ -38,7 +50,7 @@ export async function getWorkspaceRole(
     ))
     .limit(1)
   return (row?.role as WorkspaceRole) ?? null
-}
+})
 
 export async function assertWorkspaceMember(
   userId: string,

@@ -25,7 +25,9 @@ import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js'
 import { bytesToBase64 as toBase64, base64ToBytes as fromBase64 } from '@/lib/base64'
 
 const MAX_BROADCAST_BYTES = 200_000
-const SAVE_DEBOUNCE_MS = 2_000
+const SAVE_DEBOUNCE_MS = 3_000
+/** 계속 타이핑해도 이 간격마다는 한 번 저장한다 */
+const SAVE_MAX_WAIT_MS = 20_000
 
 
 export type ProviderUser = {
@@ -53,6 +55,10 @@ export class SupabaseYjsProvider {
   private channel: RealtimeChannel | null = null
   private saveTimer: ReturnType<typeof setTimeout> | null = null
   private authSub: { unsubscribe: () => void } | null = null
+  /** 디바운스가 계속 밀릴 때를 대비한 상한 */
+  private firstPendingAt: number | null = null
+  /** 마지막으로 저장한 상태 — 같은 내용을 다시 쓰지 않기 위해 */
+  private lastSavedLen = -1
   private destroyed = false
   /** 원격에서 온 업데이트를 되돌려 보내지 않기 위한 마커 */
   private readonly origin = Symbol('supabase-yjs-provider')
@@ -166,19 +172,43 @@ export class SupabaseYjsProvider {
     })
   }
 
+  /**
+   * 유휴 3초 뒤 저장하되, 계속 입력 중이어도 20초마다는 한 번 내려쓴다.
+   * 디바운스만 두면 길게 타이핑하는 동안 서버에 아무것도 안 남는다
+   * (탭이 죽으면 y-indexeddb 로만 복구된다).
+   */
   private scheduleSave() {
+    this.firstPendingAt ??= Date.now()
+    const waited = Date.now() - this.firstPendingAt
+
     if (this.saveTimer) clearTimeout(this.saveTimer)
-    this.saveTimer = setTimeout(() => {
-      if (this.destroyed) return
-      void this.opts.save(Y.encodeStateAsUpdate(this.opts.doc))
-        .catch((err) => console.error('[yjs] 서버 저장 실패', err))
-    }, SAVE_DEBOUNCE_MS)
+    const delay = waited >= SAVE_MAX_WAIT_MS
+      ? 0
+      : Math.min(SAVE_DEBOUNCE_MS, SAVE_MAX_WAIT_MS - waited)
+
+    this.saveTimer = setTimeout(() => { void this.persist() }, delay)
+  }
+
+  private async persist() {
+    if (this.destroyed) return
+    this.firstPendingAt = null
+
+    const update = Y.encodeStateAsUpdate(this.opts.doc)
+    // 같은 내용을 반복 저장하지 않는다 (원격 업데이트가 이미 반영된 경우 등)
+    if (update.byteLength === this.lastSavedLen) return
+
+    try {
+      await this.opts.save(update)
+      this.lastSavedLen = update.byteLength
+    } catch (err) {
+      console.error('[yjs] 서버 저장 실패', err)
+    }
   }
 
   /** 탭을 닫기 전 마지막 저장 */
   async flush() {
     if (this.saveTimer) clearTimeout(this.saveTimer)
-    await this.opts.save(Y.encodeStateAsUpdate(this.opts.doc))
+    await this.persist()
   }
 
   destroy() {

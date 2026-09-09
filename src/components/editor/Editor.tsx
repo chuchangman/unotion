@@ -78,7 +78,6 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
       const blocks = getBlocks.current?.() ?? null
       const res = await savePage(pageId, {
         ydocB64: bytesToBase64(update),
-        contentJson: blocks,
         plainText: blocksToPlainText(blocks),
         title: titleRef.current,
       })
@@ -191,9 +190,27 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
     [editor],
   )
 
-  /** @ 를 눌렀을 때 뜨는 페이지 목록 */
+  /**
+   * @ 를 눌렀을 때 뜨는 페이지 목록.
+   *
+   * SuggestionMenuController 는 키 입력마다 이걸 부른다.
+   * 그대로 두면 한 글자당 DB 왕복이 하나씩 나가므로 짧게 눌러 담는다.
+   * 캐시는 같은 질의가 연달아 올 때(백스페이스 등) 왕복을 아낀다.
+   */
+  const mentionCache = useRef(new Map<string, DefaultReactSuggestionItem[]>())
+  const mentionTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   const getPageMentions = useCallback(
     async (query: string): Promise<DefaultReactSuggestionItem[]> => {
+      const cached = mentionCache.current.get(query)
+      if (cached) return cached
+
+      // 마지막 입력에서 180ms 조용해질 때까지 기다린다
+      if (mentionTimer.current) clearTimeout(mentionTimer.current)
+      await new Promise<void>((resolve) => {
+        mentionTimer.current = setTimeout(resolve, 180)
+      })
+
       const res = await searchPagesForLink(workspaceId, query)
       const items: DefaultReactSuggestionItem[] = res.ok
         ? res.data
@@ -229,6 +246,10 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
           },
         })
       }
+
+      // 새로 만들기 항목은 질의에 따라 달라지므로 캐시에는 검색 결과만 넣는다
+      mentionCache.current.set(query, items)
+      if (mentionCache.current.size > 50) mentionCache.current.clear()
       return items
     },
     [workspaceId, pageId, insertPageLink, router],

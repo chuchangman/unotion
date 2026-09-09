@@ -3,7 +3,7 @@
  *
  * 규칙: 모든 export 함수는 첫 인자로 Actor 를 받고, 가장 먼저 assert* 를 호출한다.
  */
-import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
 import { generateKeyBetween } from 'fractional-indexing'
 import { db } from './db'
 import { pages, pageVersions } from './schema'
@@ -177,6 +177,45 @@ export async function listChildren(
     .orderBy(asc(pages.sortKey))
 }
 
+/**
+ * 여러 부모의 자식을 한 번에 가져온다.
+ * 페이지 보드는 칸마다 목록이 필요한데, 칸별로 부르면 칸 수만큼 왕복이 생긴다.
+ */
+export async function listChildrenBatch(
+  actor: Actor,
+  parentIds: string[],
+): Promise<Record<string, Array<{ id: string; title: string; icon: PageRow['icon'] }>>> {
+  const unique = [...new Set(parentIds)].filter(Boolean)
+  if (unique.length === 0) return {}
+
+  // 권한은 부모별로 확인한다 (한 칸이라도 못 보면 그 칸만 비운다)
+  const allowed: string[] = []
+  await Promise.all(unique.map(async (id) => {
+    try {
+      await assertCanRead(actor.userId, id)
+      allowed.push(id)
+    } catch { /* 접근 불가한 부모는 조용히 건너뛴다 */ }
+  }))
+  if (allowed.length === 0) return {}
+
+  const rows = await db
+    .select({ id: pages.id, title: pages.title, icon: pages.icon, parentId: pages.parentId })
+    .from(pages)
+    .where(and(
+      inArray(pages.parentId, allowed),
+      eq(pages.isTrashed, false),
+      isNull(pages.collectionId),
+    ))
+    .orderBy(asc(pages.sortKey))
+
+  const out: Record<string, Array<{ id: string; title: string; icon: PageRow['icon'] }>> = {}
+  for (const id of allowed) out[id] = []
+  for (const r of rows) {
+    if (r.parentId) out[r.parentId]?.push({ id: r.id, title: r.title, icon: r.icon })
+  }
+  return out
+}
+
 /** "이번 주에 뭐 바뀌었어?" — MCP 에서 체감이 큰 툴 */
 export async function getRecentChanges(
   actor: Actor,
@@ -274,12 +313,20 @@ export async function updatePageMeta(
 export async function savePageContent(
   actor: Actor,
   pageId: string,
-  input: { contentJson: unknown; plainText: string; ydoc?: Buffer | null; title?: string },
+  input: { contentJson?: unknown; plainText: string; ydoc?: Buffer | null; title?: string },
 ): Promise<void> {
   const access = await assertCanEdit(actor.userId, pageId)
 
   await db.update(pages).set({
-    contentJson: input.contentJson,
+    /**
+     * content_json 은 넘어온 경우에만 쓴다.
+     *
+     * 웹 에디터는 더 이상 보내지 않는다 — ydoc 이 본문의 진실이고
+     * 이 컬럼을 읽는 곳이 없는데도 자동저장마다 100KB 짜리 JSON 을
+     * 같이 실어 보내고 있었다 (큰 문서 기준 페이로드가 두 배였다).
+     * MCP 는 마크다운을 블록으로 바꾼 결과를 그대로 넘기므로 계속 채운다.
+     */
+    ...(input.contentJson !== undefined ? { contentJson: input.contentJson } : {}),
     plainText: input.plainText,
     ...(input.ydoc ? { ydoc: input.ydoc } : {}),
     ...(input.title !== undefined ? { title: input.title } : {}),
@@ -287,18 +334,36 @@ export async function savePageContent(
     updatedAt: new Date(),
   }).where(eq(pages.id, pageId))
 
-  await audit.record(actor, 'page.save_content', {
-    workspaceId: access.workspaceId, targetId: pageId,
-    meta: { chars: input.plainText.length },
-  })
+  /**
+   * 자동저장은 감사 로그에 남기지 않는다.
+   *
+   * 에디터가 2초마다 저장하므로 이 한 줄이 전체 감사 로그의 78% 를 차지했고
+   * (실측 303/387건), 저장할 때마다 DB 쓰기 왕복이 하나씩 더 붙었다.
+   * "누가 언제 고쳤나" 는 pages.last_edited_by / updated_at 이 이미 담고 있다.
+   *
+   * 다만 MCP 경유 변경은 남긴다 — 출처 추적이 이 로그의 존재 이유다.
+   */
+  if (actor.source !== 'web') {
+    await audit.record(actor, 'page.save_content', {
+      workspaceId: access.workspaceId, targetId: pageId,
+      meta: { chars: input.plainText.length },
+    })
+  }
 }
 
-/** 되돌리기용 스냅샷. 저장마다가 아니라 주기적/명시적으로 호출한다. */
+/**
+ * 되돌리기용 스냅샷. 저장마다가 아니라 주기적/명시적으로 호출한다.
+ *
+ * content_json 은 더 이상 상시 갱신되지 않으므로 여기서 ydoc 을 풀어
+ * 그 시점의 블록을 만들어 넣는다. 이쪽이 항상 최신이다.
+ */
 export async function snapshotVersion(actor: Actor, pageId: string): Promise<void> {
   await assertCanEdit(actor.userId, pageId)
   const page = await loadPage(pageId)
+  const { ydocBytesToBlocks } = await import('./markdown')
+  const blocks = page.ydoc ? await ydocBytesToBlocks(page.ydoc) : page.contentJson
   await db.insert(pageVersions).values({
-    pageId, title: page.title, contentJson: page.contentJson, authorId: actor.userId,
+    pageId, title: page.title, contentJson: blocks, authorId: actor.userId,
   })
 }
 
