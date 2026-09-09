@@ -1,7 +1,8 @@
+import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { Suspense } from 'react'
 import { requireSessionContext } from '@/lib/auth'
-import { getPage, resolvePageAccess } from '@/lib/core/pages'
+import { getPage, listBacklinks, resolvePageAccess } from '@/lib/core/pages'
 import * as Collections from '@/lib/core/collections'
 import { listMembers } from '@/lib/core/workspaces'
 import { countOpenThreads } from '@/lib/core/comments'
@@ -30,11 +31,12 @@ async function loadPageView(actor: Actor, workspaceId: string, pageId: string) {
      * 순차로 두면 모든 문서 페이지가 왕복을 하나씩 더 지불한다 —
      * 이 앱에서 가장 신경 쓴 게 그 왕복 수다 (README 성능 메모 참고).
      */
-    const [access, found, openComments] = await Promise.all([
+    const [access, found, openComments, backlinks] = await Promise.all([
       // 이미 가진 행을 넘겨 pages 재조회를 막는다
       resolvePageAccess(actor.userId, pageId, page),
       Collections.getCollectionForPage(actor, pageId),
       countOpenThreads(actor, pageId),
+      listBacklinks(actor, pageId),
     ])
     const canEdit = access?.level === 'edit' || access?.level === 'full'
     // read 보다 위면 코멘트를 쓸 수 있다 (read < comment < edit < full)
@@ -53,7 +55,7 @@ async function loadPageView(actor: Actor, workspaceId: string, pageId: string) {
         ])
       : [null, []]
 
-    return { page, canEdit, canComment, canManage, found, table, members, openComments }
+    return { page, canEdit, canComment, canManage, found, table, members, openComments, backlinks }
   } catch (err) {
     if (err instanceof DomainError) return null
     throw err
@@ -71,7 +73,7 @@ export default async function PageView({
   const data = await loadPageView(actor, workspace.id, pageId)
   if (!data) notFound()
 
-  const { page, canEdit, canComment, canManage, found, table, members, openComments } = data
+  const { page, canEdit, canComment, canManage, found, table, members, openComments, backlinks } = data
   const isDatabase = Boolean(found && table)
 
   /** 문서든 데이터베이스든 같은 자리에 두는 도구 모음 */
@@ -125,6 +127,31 @@ export default async function PageView({
           />
           {canEdit && !page.plainText.trim() && <ConvertToDatabase pageId={page.id} />}
         </>
+      )}
+
+      {/*
+        백링크. 서버에서 이미 받아 왔으므로 클라이언트 컴포넌트도 추가 왕복도 없다.
+        링크가 하나도 없으면 아예 그리지 않는다 — 빈 제목만 남는 건 소음이다.
+      */}
+      {backlinks.length > 0 && (
+        <section className="mt-12 border-t border-neutral-200 pt-4 dark:border-neutral-800">
+          <h2 className="text-xs font-medium text-neutral-400">
+            이 페이지를 참조하는 문서 {backlinks.length}개
+          </h2>
+          <ul className="mt-2 space-y-1">
+            {backlinks.map((b) => (
+              <li key={b.id}>
+                <Link
+                  href={`/p/${b.id}`}
+                  className="flex items-center gap-1.5 rounded px-1 py-1 text-sm text-neutral-600 hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-800"
+                >
+                  <span>{b.icon?.type === 'emoji' ? b.icon.value : '📄'}</span>
+                  <span className="truncate">{b.title || '제목 없음'}</span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
 
       <Suspense fallback={null}>

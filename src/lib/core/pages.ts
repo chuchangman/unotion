@@ -6,7 +6,7 @@
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
 import { generateKeyBetween } from 'fractional-indexing'
 import { db } from './db'
-import { pages, pageVersions, profiles } from './schema'
+import { pageLinks, pages, pageVersions, profiles } from './schema'
 import { InvalidInput, NotFound } from './errors'
 import { assertCanEdit, assertCanManage, assertCanRead, assertWorkspaceMember, resolvePageAccess } from './permissions'
 import * as audit from './audit'
@@ -318,7 +318,18 @@ export async function updatePageMeta(
 export async function savePageContent(
   actor: Actor,
   pageId: string,
-  input: { contentJson?: unknown; plainText: string; ydoc?: Buffer | null; title?: string },
+  input: {
+    contentJson?: unknown
+    plainText: string
+    ydoc?: Buffer | null
+    title?: string
+    /**
+     * 본문이 가리키는 페이지 id 들 (백링크용).
+     * **바뀌었을 때만** 보낸다 — 자동저장마다 링크 테이블을 다시 쓰면
+     * 2초짜리 저장 경로에 쓰기 왕복이 두 개(delete + insert) 늘 붙는다.
+     */
+    links?: string[]
+  },
 ): Promise<void> {
   const access = await assertCanEdit(actor.userId, pageId)
 
@@ -338,6 +349,8 @@ export async function savePageContent(
     lastEditedBy: actor.userId,
     updatedAt: new Date(),
   }).where(eq(pages.id, pageId))
+
+  if (input.links !== undefined) await replaceOutgoingLinks(pageId, input.links)
 
   /**
    * 자동저장은 감사 로그에 남기지 않는다.
@@ -385,6 +398,44 @@ export async function snapshotVersion(actor: Actor, pageId: string): Promise<voi
 
 /** BlockNote 는 최소 한 블록을 요구한다. 빈 문서는 빈 문단 하나로 표현한다. */
 const EMPTY_DOC = [{ type: 'paragraph' }]
+
+/**
+ * 이 페이지에서 나가는 링크를 통째로 갈아끼운다.
+ *
+ * 자기 자신을 가리키는 링크는 버린다 — 백링크 목록에 자기가 나오면 헷갈리기만 한다.
+ * 대상 페이지가 지워졌으면 FK 가 막으므로, 실재하는 페이지만 남긴다.
+ */
+async function replaceOutgoingLinks(fromPageId: string, toIds: string[]): Promise<void> {
+  const targets = [...new Set(toIds)].filter((id) => id && id !== fromPageId)
+
+  await db.delete(pageLinks).where(eq(pageLinks.fromPageId, fromPageId))
+  if (targets.length === 0) return
+
+  const alive = await db
+    .select({ id: pages.id })
+    .from(pages)
+    .where(inArray(pages.id, targets))
+
+  if (alive.length === 0) return
+  await db.insert(pageLinks)
+    .values(alive.map((p) => ({ fromPageId, toPageId: p.id })))
+    .onConflictDoNothing()
+}
+
+export type Backlink = { id: string; title: string; icon: PageRow['icon'] }
+
+/** 이 페이지를 본문에서 가리키는 페이지들 */
+export async function listBacklinks(actor: Actor, pageId: string): Promise<Backlink[]> {
+  await assertCanRead(actor.userId, pageId)
+
+  return db
+    .select({ id: pages.id, title: pages.title, icon: pages.icon })
+    .from(pageLinks)
+    .innerJoin(pages, eq(pages.id, pageLinks.fromPageId))
+    .where(and(eq(pageLinks.toPageId, pageId), eq(pages.isTrashed, false)))
+    .orderBy(asc(pages.title))
+    .limit(50)
+}
 
 /** 스냅샷 최소 간격. 자동저장은 2초마다 도는데 그때마다 찍으면 버전이 수천 개가 된다. */
 export const VERSION_MIN_GAP_MS = 10 * 60 * 1000

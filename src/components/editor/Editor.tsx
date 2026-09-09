@@ -20,7 +20,7 @@ import '@blocknote/mantine/style.css'
 
 import { createClient } from '@/lib/supabase/client'
 import { SupabaseYjsProvider, type ProviderStatus } from '@/lib/realtime/supabase-yjs-provider'
-import { blocksToPlainText } from '@/lib/blocks'
+import { blocksToPlainText, blocksToPageLinks } from '@/lib/blocks'
 import { bytesToBase64, base64ToBytes } from '@/lib/base64'
 import { loadYdoc, savePage, searchPagesForLink, createLinkedChildPage, snapshotVersion } from '@/app/actions/pages'
 import { filterSuggestionItems } from '@blocknote/core/extensions'
@@ -126,6 +126,9 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
    */
   const lastSnapshotAt = useRef(0)
 
+  /** 마지막으로 서버에 보낸 링크 목록의 서명. 빈 문자열이면 아직 안 보냈다는 뜻 */
+  const lastLinks = useRef<string | null>(null)
+
   const provider = useMemo(() => new SupabaseYjsProvider({
     supabase,
     pageId,
@@ -153,10 +156,22 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
       maybeSnapshot(pageId, lastSnapshotAt)
 
       const blocks = getBlocks.current?.() ?? null
+
+      /**
+       * 백링크용 링크 목록은 **바뀌었을 때만** 실어 보낸다.
+       * 매 저장(2초)마다 보내면 서버가 링크 테이블을 지웠다 다시 넣느라
+       * 쓰기 왕복이 두 개씩 늘어난다.
+       */
+      const links = blocksToPageLinks(blocks)
+      const signature = links.join(',')
+      const linksChanged = signature !== lastLinks.current
+      if (linksChanged) lastLinks.current = signature
+
       const res = await savePage(pageId, {
         ydocB64: bytesToBase64(update),
         plainText: blocksToPlainText(blocks),
         title: titleRef.current,
+        ...(linksChanged ? { links } : {}),
       })
       if (!res.ok) console.error('[editor] 저장 실패', res.message)
     },
