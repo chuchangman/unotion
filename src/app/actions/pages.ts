@@ -46,7 +46,7 @@ export async function loadYdoc(pageId: string): Promise<ActionResult<string | nu
  */
 export async function savePage(
   pageId: string,
-  input: { ydocB64: string; plainText: string; title: string },
+  input: { ydocB64: string; plainText: string; title: string; links?: string[] },
 ): Promise<ActionResult<null>> {
   return run(async () => {
     const actor = await requireActor()
@@ -54,6 +54,8 @@ export async function savePage(
       ydoc: Buffer.from(input.ydocB64, 'base64'),
       plainText: input.plainText,
       title: input.title,
+      // 링크는 바뀌었을 때만 실려 온다 (없으면 링크 테이블을 건드리지 않는다)
+      ...(input.links !== undefined ? { links: input.links } : {}),
     })
     return null
   })
