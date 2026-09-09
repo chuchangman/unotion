@@ -98,6 +98,38 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
       schema: BlockNoteSchema.create({
         blockSpecs: { ...defaultBlockSpecs, [PAGE_BOARD_TYPE]: PageBoardBlock() },
       }),
+      /**
+       * 링크 클릭 처리.
+       *
+       * BlockNote 의 Link 확장은 기본적으로 window.open() 을 **직접** 부른다.
+       * 바깥 div 의 onClick 으로 잡으면 그보다 늦어서 새 탭이 이미 열린 뒤다
+       * (기본 동작이 아니라 명시적 호출이라 preventDefault 로도 못 막는다).
+       * 이 훅을 주면 기본 동작이 꺼지고 여기로만 들어온다.
+       *
+       * 내부 링크(/p/...)는 우측 미리보기 패널로 열고, 외부 링크는 새 탭으로 둔다.
+       */
+      links: {
+        onClick: (event) => {
+          const anchor = (event.target as HTMLElement | null)?.closest?.('a')
+          const href = anchor?.getAttribute('href') ?? ''
+
+          // 수식어 키를 누른 클릭은 새 탭으로 (브라우저 관습을 지킨다)
+          if (event.metaKey || event.ctrlKey || event.shiftKey) {
+            window.open(href, '_blank', 'noopener,noreferrer')
+            return true
+          }
+
+          if (href.startsWith('/p/')) {
+            const qs = new URLSearchParams(window.location.search)
+            qs.set('peek', href.slice('/p/'.length))
+            router.push(`${window.location.pathname}?${qs}`, { scroll: false })
+            return true
+          }
+
+          if (href) window.open(href, '_blank', 'noopener,noreferrer')
+          return true
+        },
+      },
       collaboration: {
         fragment: doc.getXmlFragment('blocknote'),
         user: { name: user.name, color: colorFor(user.id) },
@@ -274,26 +306,7 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
     <div className="relative">
       <ConnectionBadge status={status} />
       {!ready && <p className="px-1 py-2 text-sm text-neutral-400">불러오는 중...</p>}
-      {/**
-        * 내부 링크(/p/...)는 우측 미리보기 패널로 연다 (노션의 side peek).
-        * 전체 이동을 시키면 에디터와 실시간 소켓이 통째로 다시 뜨고,
-        * 보던 문서에서 맥락이 끊긴다.
-        * Ctrl/Cmd/Shift 클릭은 브라우저에 맡겨 새 탭으로 열리게 둔다.
-        */}
-      <div
-        data-workspace-id={workspaceId}
-        onClick={(e) => {
-          const a = (e.target as HTMLElement).closest?.('a')
-          const href = a?.getAttribute('href')
-          if (!href?.startsWith('/p/')) return
-          if (e.metaKey || e.ctrlKey || e.shiftKey) return
-          e.preventDefault()
-          const target = href.slice('/p/'.length)
-          const qs = new URLSearchParams(window.location.search)
-          qs.set('peek', target)
-          router.push(`${window.location.pathname}?${qs}`, { scroll: false })
-        }}
-      >
+      <div data-workspace-id={workspaceId}>
         <BlockNoteView editor={editor} editable={canEdit} slashMenu={false}>
           {/* 슬래시 메뉴 — 기본 항목 + 하위 페이지 */}
           <SuggestionMenuController
