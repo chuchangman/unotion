@@ -6,6 +6,7 @@ import { useTransition } from 'react'
 import { KeyRound, Plus, Search, Trash2, Users } from 'lucide-react'
 import { createPage } from '@/app/actions/pages'
 import { OPEN_SEARCH_EVENT } from '@/components/search/SearchPalette'
+import { NotificationBell } from '@/components/notifications/NotificationBell'
 import { PageTree } from './PageTree'
 import type { TreeNode } from '@/lib/core/pages'
 
@@ -13,9 +14,10 @@ type Props = {
   workspace: { id: string; name: string }
   nodes: TreeNode[]
   user: { name: string }
+  unread: number
 }
 
-export function Sidebar({ workspace, nodes, user }: Props) {
+export function Sidebar({ workspace, nodes, user, unread }: Props) {
   const router = useRouter()
   const [pending, start] = useTransition()
 
@@ -73,6 +75,8 @@ export function Sidebar({ workspace, nodes, user }: Props) {
           <Users className="size-4" />
           팀 멤버
         </Link>
+
+        <NotificationBell initialUnread={unread} />
 
         <Link
           href="/trash"
