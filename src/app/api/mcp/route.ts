@@ -1,12 +1,20 @@
 /**
  * MCP 서버 엔드포인트.
  *
- *   claude mcp add --transport http unotion \
- *     https://unotion.vercel.app/api/mcp \
- *     --header "Authorization: Bearer unot_..."
+ *   Claude Code:
+ *     claude mcp add --transport http unotion \
+ *       https://unotion.vercel.app/api/mcp \
+ *       --header "Authorization: Bearer unot_..."
+ *
+ *   Codex CLI (0.149+):
+ *     codex mcp add unotion --url https://unotion.vercel.app/api/mcp \
+ *       --bearer-token-env-var UNOTION_TOKEN
+ *
+ * 둘 다 streamable HTTP + protocolVersion 2025-06-18 로 붙는다. 전송 계층은 같고
+ * 토큰을 어디서 읽느냐만 다르다 — Claude 는 고정 헤더, Codex 는 환경변수다.
  *
  * 인증: 개인 액세스 토큰(PAT). MCP 2026-07-28 스펙의 OAuth 2.1 은 Phase 6 에서 붙인다
- * (claude.ai / Desktop 커넥터로 쓰려면 그때 필요하다). Claude Code 는 PAT 로 충분하다.
+ * (claude.ai / Desktop 커넥터로 쓰려면 그때 필요하다). Claude Code 와 Codex 는 PAT 로 충분하다.
  *
  * ★ 보안: 여기서 service_role 을 쓰지 않는다. 토큰 -> userId 로 풀고 그 사용자로
  *   lib/core 를 호출하므로 웹 UI 와 완전히 같은 권한 경계를 지난다.
@@ -63,4 +71,40 @@ const authenticated = withMcpAuth(
   { required: true },
 )
 
-export { authenticated as GET, authenticated as POST, authenticated as DELETE }
+/**
+ * 401 을 클라이언트가 읽을 수 있게 다듬는다.
+ *
+ * mcp-handler 는 두 가지 실패를 똑같이 "No authorization provided" 로 뭉뚱그리고,
+ * 우리가 구현하지도 않은 OAuth 메타데이터(resource_metadata)를 함께 광고한다.
+ * 그 URL 은 proxy 에 걸려 /login HTML 로 307 되므로 어느 클라이언트도 쓸 수 없다.
+ *
+ * Codex(rmcp)는 그 힌트를 보고 OAuth 흐름으로 들어갔다가
+ *   worker quit with fatal: Transport channel closed, when AuthRequired(...)
+ * 로 죽는다 — "토큰이 틀렸다"는 사실이 어디에도 보이지 않는다.
+ *
+ * OAuth 2.1 은 Phase 6 이다. 그때 진짜 메타데이터를 서빙하면서 이 래퍼를 걷어낸다.
+ */
+async function handle(req: Request): Promise<Response> {
+  const res = await authenticated(req)
+  if (res.status !== 401) return res
+
+  const provided = /^Bearer\s+\S/i.test(req.headers.get('authorization') ?? '')
+  const detail = provided
+    ? '토큰이 유효하지 않거나 폐기되었습니다. 앱의 설정 > 액세스 토큰에서 새로 발급하세요.'
+    : 'Authorization: Bearer <토큰> 헤더가 없습니다. 앱의 설정 > 액세스 토큰에서 발급하세요.'
+
+  // 헤더 값은 ASCII 여야 한다 (RFC 9110). 한국어 안내는 본문에만 싣는다.
+  const reason = provided ? 'invalid or revoked token' : 'missing bearer token'
+
+  const headers = new Headers(res.headers)
+  headers.set('www-authenticate', `Bearer error="invalid_token", error_description="${reason}"`)
+  headers.set('content-type', 'application/json')
+  headers.delete('content-length')
+
+  return new Response(
+    JSON.stringify({ error: 'invalid_token', error_description: detail }),
+    { status: 401, headers },
+  )
+}
+
+export { handle as GET, handle as POST, handle as DELETE }

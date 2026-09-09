@@ -23,7 +23,8 @@ async function rpc(method, params, bearer = token) {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      accept: 'application/json, text/event-stream',
+      // Codex(rmcp)가 보내는 순서. Claude Code 는 반대 순서로 보내는데 서버는 둘 다 받는다.
+      accept: 'text/event-stream, application/json',
       ...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
     },
     body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }),

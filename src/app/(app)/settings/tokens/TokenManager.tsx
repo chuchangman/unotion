@@ -20,7 +20,7 @@ export function TokenManager({ tokens, mcpUrl }: { tokens: TokenRow[]; mcpUrl: s
   const create = () =>
     start(async () => {
       setError('')
-      const res = await issueToken(name || 'Claude')
+      const res = await issueToken(name || 'MCP')
       if (res.ok) { setIssued(res.data.plaintext); setName('') }
       else setError(res.message)
     })
@@ -92,9 +92,15 @@ export function TokenManager({ tokens, mcpUrl }: { tokens: TokenRow[]; mcpUrl: s
   )
 }
 
+const CLIENTS = [
+  { id: 'claude', label: 'Claude Code' },
+  { id: 'codex', label: 'Codex CLI' },
+] as const
+
+type ClientId = (typeof CLIENTS)[number]['id']
+
 function IssuedToken({ token, mcpUrl, onDone }: { token: string; mcpUrl: string; onDone: () => void }) {
-  const command =
-    `claude mcp add --transport http unotion ${mcpUrl} \\n  --header "Authorization: Bearer ${token}"`
+  const [client, setClient] = useState<ClientId>('claude')
 
   return (
     <section className="rounded-lg border border-amber-300 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-950/40">
@@ -102,10 +108,34 @@ function IssuedToken({ token, mcpUrl, onDone }: { token: string; mcpUrl: string;
         토큰이 발급되었습니다. 이 화면을 벗어나면 다시 볼 수 없습니다.
       </p>
 
-      <p className="mt-4 text-xs font-medium text-amber-900 dark:text-amber-200">
-        터미널에 아래 명령을 붙여넣으세요
-      </p>
-      <CopyBox value={command} />
+      <div role="tablist" aria-label="연결할 도구" className="mt-4 flex gap-1">
+        {CLIENTS.map((c) => (
+          <button
+            key={c.id}
+            type="button"
+            role="tab"
+            aria-selected={client === c.id}
+            onClick={() => setClient(c.id)}
+            className={
+              'rounded-md px-3 py-1.5 text-xs font-medium ' +
+              (client === c.id
+                ? 'bg-amber-900 text-amber-50 dark:bg-amber-200 dark:text-amber-950'
+                : 'text-amber-900 hover:bg-amber-100 dark:text-amber-200 dark:hover:bg-amber-900/40')
+            }
+          >
+            {c.label}
+          </button>
+        ))}
+      </div>
+
+      {client === 'claude' ? (
+        <CopyBox
+          label="터미널에 아래 명령을 붙여넣으세요"
+          value={`claude mcp add --transport http unotion ${mcpUrl} --header "Authorization: Bearer ${token}"`}
+        />
+      ) : (
+        <CodexSetup token={token} mcpUrl={mcpUrl} />
+      )}
 
       <button
         type="button"
@@ -118,7 +148,63 @@ function IssuedToken({ token, mcpUrl, onDone }: { token: string; mcpUrl: string;
   )
 }
 
-function CopyBox({ value }: { value: string }) {
+/**
+ * Codex 는 토큰을 헤더가 아니라 **환경변수**에서 읽는다
+ * (`codex mcp add` 에는 --header 같은 플래그가 없다). 그래서 두 단계다.
+ * 환경변수는 설정한 뒤 새로 여는 터미널부터 보인다.
+ */
+function CodexSetup({ token, mcpUrl }: { token: string; mcpUrl: string }) {
+  const [os, setOs] = useState<'win' | 'unix'>(
+    typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent) ? 'win' : 'unix',
+  )
+
+  return (
+    <>
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <p className="text-xs font-medium text-amber-900 dark:text-amber-200">
+          1. 토큰을 환경변수에 넣습니다
+        </p>
+        <div className="flex gap-1">
+          {([['win', 'Windows'], ['unix', 'macOS · Linux']] as const).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setOs(id)}
+              aria-pressed={os === id}
+              className={
+                'rounded px-2 py-0.5 text-[11px] ' +
+                (os === id
+                  ? 'bg-amber-200 font-medium text-amber-950 dark:bg-amber-800 dark:text-amber-100'
+                  : 'text-amber-700 hover:bg-amber-100 dark:text-amber-300 dark:hover:bg-amber-900/40')
+              }
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <CopyBox
+        value={
+          os === 'win'
+            ? `setx UNOTION_TOKEN "${token}"`
+            : `echo 'export UNOTION_TOKEN="${token}"' >> ~/.zshrc && source ~/.zshrc`
+        }
+      />
+
+      <CopyBox
+        label="2. Codex 에 서버를 등록합니다"
+        value={`codex mcp add unotion --url ${mcpUrl} --bearer-token-env-var UNOTION_TOKEN`}
+      />
+
+      <p className="mt-2 text-[11px] text-amber-800 dark:text-amber-300">
+        환경변수는 새로 여는 터미널부터 적용됩니다. 등록 확인은{' '}
+        <code className="rounded bg-amber-100 px-1 dark:bg-amber-900/60">codex mcp list</code> 입니다.
+      </p>
+    </>
+  )
+}
+
+function CopyBox({ value, label }: { value: string; label?: string }) {
   const [copied, setCopied] = useState(false)
 
   const copy = async () => {
@@ -132,18 +218,23 @@ function CopyBox({ value }: { value: string }) {
   }
 
   return (
-    <div className="mt-1 flex items-start gap-2">
-      <pre className="flex-1 overflow-x-auto rounded border border-amber-300 bg-white p-2 text-xs dark:border-amber-800 dark:bg-neutral-900">
-        <code>{value}</code>
-      </pre>
-      <button
-        type="button"
-        onClick={copy}
-        aria-label="복사"
-        className="shrink-0 rounded border border-amber-300 bg-white p-2 hover:bg-amber-100 dark:border-amber-800 dark:bg-neutral-900"
-      >
-        {copied ? <Check className="size-4 text-green-600" /> : <Copy className="size-4" />}
-      </button>
-    </div>
+    <>
+      {label && (
+        <p className="mt-4 text-xs font-medium text-amber-900 dark:text-amber-200">{label}</p>
+      )}
+      <div className="mt-1 flex items-start gap-2">
+        <pre className="flex-1 overflow-x-auto rounded border border-amber-300 bg-white p-2 text-xs dark:border-amber-800 dark:bg-neutral-900">
+          <code>{value}</code>
+        </pre>
+        <button
+          type="button"
+          onClick={copy}
+          aria-label="복사"
+          className="shrink-0 rounded border border-amber-300 bg-white p-2 hover:bg-amber-100 dark:border-amber-800 dark:bg-neutral-900"
+        >
+          {copied ? <Check className="size-4 text-green-600" /> : <Copy className="size-4" />}
+        </button>
+      </div>
+    </>
   )
 }
