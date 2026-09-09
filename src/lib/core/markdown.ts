@@ -53,6 +53,22 @@ export async function blocksToMarkdown(blocks: unknown) {
   return (await editor()).blocksToMarkdownLossy(blocks as any)
 }
 
+/**
+ * 저장된 ydoc 을 **의미론적 HTML** 로. 웹 공개 공유 페이지가 쓴다.
+ *
+ * blocksToFullHTML 이 아니라 Lossy 를 쓴다. Full 은 BlockNote 의 내부 클래스와
+ * 구조를 그대로 뱉어서 에디터 CSS 가 있어야 제대로 보인다. 공개 페이지에는
+ * 에디터 번들을 싣지 않는 게 요점이므로, h1/p/ul/table 같은 평범한 태그로 받는다.
+ *
+ * 반환값은 그대로 삽입되므로 **호출부가 반드시 sanitizeHtml 을 거쳐야 한다.**
+ */
+export async function ydocBytesToHTML(bytes: Buffer | Uint8Array | null): Promise<string> {
+  const blocks = await ydocBytesToBlocks(bytes)
+  if (!Array.isArray(blocks) || blocks.length === 0) return ''
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (await editor()).blocksToHTMLLossy(blocks as any)
+}
+
 export async function ydocBytesToBlocks(bytes: Buffer | Uint8Array | null) {
   if (!bytes || bytes.byteLength === 0) return []
   const doc = new Y.Doc()

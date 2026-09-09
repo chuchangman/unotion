@@ -9,9 +9,11 @@
 import { revalidatePath } from 'next/cache'
 import { requireActor } from '@/lib/auth'
 import * as Sharing from '@/lib/core/sharing'
+import * as PublicShares from '@/lib/core/public-share'
 import { DomainError } from '@/lib/core/errors'
 import type { PermissionLevel } from '@/lib/core/schema'
 import type { SharingEntry } from '@/lib/core/sharing'
+import type { PublicShare } from '@/lib/core/public-share'
 
 export type ActionResult<T> =
   | { ok: true; data: T }
@@ -59,6 +61,35 @@ export async function clearPagePermission(
     const actor = await requireActor()
     await Sharing.clearPagePermission(actor, pageId, userId)
     revalidatePath('/', 'layout')
+    return null
+  })
+}
+
+// ─────────────────────────────────── 웹 공개 공유
+
+export async function getPublicShare(
+  pageId: string,
+): Promise<ActionResult<PublicShare | null>> {
+  return run(async () => {
+    const actor = await requireActor()
+    return PublicShares.getPublicShare(actor, pageId)
+  })
+}
+
+export async function createPublicShare(
+  pageId: string,
+  allowIndexing = false,
+): Promise<ActionResult<PublicShare>> {
+  return run(async () => {
+    const actor = await requireActor()
+    return PublicShares.createPublicShare(actor, pageId, { allowIndexing })
+  })
+}
+
+export async function revokePublicShare(pageId: string): Promise<ActionResult<null>> {
+  return run(async () => {
+    const actor = await requireActor()
+    await PublicShares.revokePublicShare(actor, pageId)
     return null
   })
 }
