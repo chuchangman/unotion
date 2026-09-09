@@ -1,11 +1,56 @@
 import { notFound } from 'next/navigation'
+import { Suspense } from 'react'
 import { requireSessionContext } from '@/lib/auth'
 import { getPage, resolvePageAccess } from '@/lib/core/pages'
+import * as Collections from '@/lib/core/collections'
+import { listMembers } from '@/lib/core/workspaces'
 import { DomainError } from '@/lib/core/errors'
+import type { Actor } from '@/lib/core/actor'
 import { PageHeader } from '@/components/editor/PageHeader'
 import { EditorLoader } from '@/components/editor/EditorLoader'
 import { PeekPanel } from '@/components/editor/PeekPanel'
-import { Suspense } from 'react'
+import { CollectionView } from '@/components/collection/CollectionView'
+import { ConvertToDatabase } from '@/components/collection/ConvertToDatabase'
+import { VersionHistory } from '@/components/editor/VersionHistory'
+
+/**
+ * 데이터 로딩은 여기서 끝낸다.
+ * JSX 를 try/catch 안에서 만들면 안 된다 — React 는 JSX 를 만든 자리에서
+ * 렌더하지 않으므로 그 catch 는 렌더 오류를 잡지 못한다 (react-hooks/error-boundaries).
+ */
+async function loadPageView(actor: Actor, workspaceId: string, pageId: string) {
+  try {
+    const page = await getPage(actor, pageId)
+
+    /**
+     * 권한 계산과 "이 페이지가 데이터베이스인가" 조회를 **동시에** 한다.
+     * 순차로 두면 모든 문서 페이지가 왕복을 하나씩 더 지불한다 —
+     * 이 앱에서 가장 신경 쓴 게 그 왕복 수다 (README 성능 메모 참고).
+     */
+    const [access, found] = await Promise.all([
+      // 이미 가진 행을 넘겨 pages 재조회를 막는다
+      resolvePageAccess(actor.userId, pageId, page),
+      Collections.getCollectionForPage(actor, pageId),
+    ])
+    const canEdit = access?.level === 'edit' || access?.level === 'full'
+
+    /**
+     * 멤버 목록은 데이터베이스 페이지에서만 필요하다(사람 속성 렌더용).
+     * 일반 문서 페이지에 왕복을 하나 더 붙이지 않으려고 조건부로 부른다.
+     */
+    const [table, members] = found
+      ? await Promise.all([
+          Collections.listRows(actor, found.collection.id, { viewId: found.views[0]?.id }),
+          listMembers(actor, workspaceId),
+        ])
+      : [null, []]
+
+    return { page, canEdit, found, table, members }
+  } catch (err) {
+    if (err instanceof DomainError) return null
+    throw err
+  }
+}
 
 export default async function PageView({
   params,
@@ -15,37 +60,57 @@ export default async function PageView({
   const { pageId } = await params
   const { actor, workspace, displayName } = await requireSessionContext()
 
-  try {
-    const page = await getPage(actor, pageId)
-    // 이미 가진 행을 넘겨 pages 재조회를 막는다
-    const access = await resolvePageAccess(actor.userId, pageId, page)
-    const canEdit = access?.level === 'edit' || access?.level === 'full'
+  const data = await loadPageView(actor, workspace.id, pageId)
+  if (!data) notFound()
 
-    return (
-      <article className="mx-auto max-w-3xl px-12 py-16">
-        <PageHeader
-          pageId={page.id}
-          initialTitle={page.title}
-          icon={page.icon}
+  const { page, canEdit, found, table, members } = data
+  const isDatabase = Boolean(found && table)
+
+  return (
+    <article className={`mx-auto px-12 py-16 ${isDatabase ? 'max-w-6xl' : 'max-w-3xl'}`}>
+      <PageHeader
+        pageId={page.id}
+        initialTitle={page.title}
+        icon={page.icon}
+        canEdit={canEdit}
+      />
+
+      {found && table ? (
+        <CollectionView
+          initial={{
+            collection: found.collection,
+            views: found.views,
+            schema: table.schema,
+            rows: table.rows,
+            truncated: table.truncated,
+            activeViewId: found.views[0]?.id ?? '',
+          }}
+          members={members}
           canEdit={canEdit}
         />
-        <EditorLoader
-          pageId={page.id}
-          workspaceId={workspace.id}
-          title={page.title}
-          user={{ id: actor.userId, name: displayName }}
-          canEdit={canEdit}
-        />
-        <Suspense fallback={null}>
-          <PeekPanel
+      ) : (
+        <>
+          {/* 본문이 있는 문서에만 기록이 의미가 있다 */}
+          <div className="flex justify-end">
+            <VersionHistory pageId={page.id} canEdit={canEdit} />
+          </div>
+          <EditorLoader
+            pageId={page.id}
             workspaceId={workspace.id}
+            title={page.title}
             user={{ id: actor.userId, name: displayName }}
+            canEdit={canEdit}
           />
-        </Suspense>
-      </article>
-    )
-  } catch (err) {
-    if (err instanceof DomainError) notFound()
-    throw err
-  }
+          {canEdit && !page.plainText.trim() && <ConvertToDatabase pageId={page.id} />}
+        </>
+      )}
+
+      <Suspense fallback={null}>
+        <PeekPanel
+          workspaceId={workspace.id}
+          user={{ id: actor.userId, name: displayName }}
+        />
+      </Suspense>
+    </article>
+  )
 }

@@ -22,12 +22,72 @@ import { createClient } from '@/lib/supabase/client'
 import { SupabaseYjsProvider, type ProviderStatus } from '@/lib/realtime/supabase-yjs-provider'
 import { blocksToPlainText } from '@/lib/blocks'
 import { bytesToBase64, base64ToBytes } from '@/lib/base64'
-import { loadYdoc, savePage, searchPagesForLink, createLinkedChildPage } from '@/app/actions/pages'
+import { loadYdoc, savePage, searchPagesForLink, createLinkedChildPage, snapshotVersion } from '@/app/actions/pages'
 import { filterSuggestionItems } from '@blocknote/core/extensions'
 import { FileText, FilePlus } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 
 const USER_COLORS = ['#ef4444', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ec4899']
+
+/** 되돌리기 스냅샷을 남기는 최소 간격. 서버(pages.ts VERSION_MIN_GAP_MS)와 같은 값이다. */
+const VERSION_SNAPSHOT_GAP_MS = 10 * 60 * 1000
+
+/** 본문에 붙는 이미지·파일 버킷 (drizzle/0003_storage.sql) */
+const FILE_BUCKET = 'page-files'
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+/**
+ * 파일을 스토리지에 올리고 **공개 URL** 을 돌려준다.
+ *
+ * 경로는 `<pageId>/<uuid>.<확장자>` 다. 첫 세그먼트가 페이지 id 라서
+ * 스토리지 정책이 "그 페이지를 읽을 수 있는 사람만 업로드" 를 그대로 물어볼 수 있다.
+ * 원본 파일명은 경로에 넣지 않는다 — 한글·공백·중복 처리에서 사고가 나기 쉽고,
+ * 공개 버킷에서는 파일명 자체가 정보를 흘린다.
+ *
+ * 반환한 URL 은 본문 ydoc 안에 그대로 저장되므로 만료되면 안 된다.
+ * 그래서 서명 URL 이 아니라 공개 URL 이다 (0003 의 설계 메모 참고).
+ */
+async function uploadToStorage(
+  supabase: ReturnType<typeof createClient>,
+  pageId: string,
+  file: File,
+): Promise<string> {
+  if (file.size > MAX_UPLOAD_BYTES) {
+    throw new Error(`파일이 너무 큽니다 (최대 10MB, 지금 ${(file.size / 1024 / 1024).toFixed(1)}MB)`)
+  }
+
+  const ext = (file.name.split('.').pop() ?? '').toLowerCase().replace(/[^a-z0-9]/g, '')
+  const path = `${pageId}/${crypto.randomUUID()}${ext ? `.${ext}` : ''}`
+
+  const { error } = await supabase.storage.from(FILE_BUCKET).upload(path, file, {
+    contentType: file.type || 'application/octet-stream',
+    // 경로에 uuid 가 있어 내용이 바뀌지 않는다 — 오래 캐시해도 안전하다
+    cacheControl: '31536000',
+    upsert: false,
+  })
+
+  if (error) {
+    // 버킷의 allowed_mime_types / file_size_limit 에 걸린 경우가 대부분이다
+    throw new Error(`업로드 실패: ${error.message}`)
+  }
+
+  return supabase.storage.from(FILE_BUCKET).getPublicUrl(path).data.publicUrl
+}
+
+/**
+ * 간격이 충분히 지났으면 되돌리기용 스냅샷을 요청한다.
+ *
+ * 컴포넌트 **밖에** 둔다. 안에 두면 호출부가 useMemo 안이라
+ * 린터가 Date.now()/ref 접근을 렌더 단계 코드로 보고 막는다
+ * (실제로는 저장 콜백에서 나중에 실행된다).
+ */
+function maybeSnapshot(pageId: string, lastAt: { current: number }) {
+  const now = Date.now()
+  if (now - lastAt.current <= VERSION_SNAPSHOT_GAP_MS) return
+  lastAt.current = now
+  // 스냅샷 실패가 저장을 막아서는 안 된다
+  snapshotVersion(pageId).catch(() => {})
+}
 
 function colorFor(id: string) {
   let h = 0
@@ -60,6 +120,12 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
   const titleRef = useRef(title)
   titleRef.current = title
 
+  /**
+   * 되돌리기용 스냅샷 간격. 0 으로 시작하므로 **이 문서의 첫 저장은 항상 스냅샷을 남긴다**
+   * — 편집을 시작하기 직전 상태가 그때 박제된다.
+   */
+  const lastSnapshotAt = useRef(0)
+
   const provider = useMemo(() => new SupabaseYjsProvider({
     supabase,
     pageId,
@@ -75,6 +141,17 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
       return res.data ? base64ToBytes(res.data) : null
     },
     save: async (update) => {
+      /**
+       * 저장 **직전에** 되돌리기용 스냅샷을 남긴다.
+       * 이 시점의 서버 ydoc 에는 아직 이번 편집이 반영되지 않았으므로,
+       * 결과적으로 "편집을 시작하기 직전 상태"가 버전으로 남는다.
+       *
+       * 서버 액션은 클라이언트당 순차 디스패치라 이 호출이 아래 savePage 보다
+       * 먼저 도착하는 것이 보장된다. 10분에 한 번만 부르고, 서버도 같은 간격으로
+       * 한 번 더 막는다 (여러 명이 같은 문서를 편집하는 경우).
+       */
+      maybeSnapshot(pageId, lastSnapshotAt)
+
       const blocks = getBlocks.current?.() ?? null
       const res = await savePage(pageId, {
         ydocB64: bytesToBase64(update),
@@ -97,6 +174,11 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
       schema: BlockNoteSchema.create({
         blockSpecs: { ...defaultBlockSpecs, [PAGE_BOARD_TYPE]: PageBoardBlock() },
       }),
+      /**
+       * 이미지·파일 업로드. 이게 없으면 BlockNote 는 URL 붙여넣기만 받는다
+       * (드래그앤드롭·붙여넣기·"파일 선택"이 전부 죽어 있었다).
+       */
+      uploadFile: (file: File) => uploadToStorage(supabase, pageId, file),
       /**
        * 링크 클릭 처리.
        *
