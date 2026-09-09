@@ -52,6 +52,18 @@ export const getWorkspaceRole = cache(async function getWorkspaceRole(
   return (row?.role as WorkspaceRole) ?? null
 })
 
+/**
+ * 워크스페이스 역할만 있을 때의 기본 페이지 권한.
+ * 공유 화면이 "이 사람은 왜 이 권한인가"를 설명하려면 이 규칙이 필요하다 —
+ * 규칙을 복사해 두면 갈라지므로 여기서 내보낸다.
+ */
+export function defaultLevelForRole(role: WorkspaceRole | null): PermissionLevel | null {
+  return role ? ROLE_DEFAULT[role] : null
+}
+
+/** 권한 세기 비교용. 숫자가 클수록 강하다. */
+export const LEVEL_RANK: Readonly<Record<PermissionLevel, number>> = RANK
+
 export async function assertWorkspaceMember(
   userId: string,
   workspaceId: string,

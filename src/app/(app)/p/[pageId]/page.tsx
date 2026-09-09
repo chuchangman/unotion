@@ -4,6 +4,7 @@ import { requireSessionContext } from '@/lib/auth'
 import { getPage, resolvePageAccess } from '@/lib/core/pages'
 import * as Collections from '@/lib/core/collections'
 import { listMembers } from '@/lib/core/workspaces'
+import { countOpenThreads } from '@/lib/core/comments'
 import { DomainError } from '@/lib/core/errors'
 import type { Actor } from '@/lib/core/actor'
 import { PageHeader } from '@/components/editor/PageHeader'
@@ -12,6 +13,8 @@ import { PeekPanel } from '@/components/editor/PeekPanel'
 import { CollectionView } from '@/components/collection/CollectionView'
 import { ConvertToDatabase } from '@/components/collection/ConvertToDatabase'
 import { VersionHistory } from '@/components/editor/VersionHistory'
+import { CommentPanel } from '@/components/comments/CommentPanel'
+import { SharePanel } from '@/components/sharing/SharePanel'
 
 /**
  * 데이터 로딩은 여기서 끝낸다.
@@ -27,12 +30,17 @@ async function loadPageView(actor: Actor, workspaceId: string, pageId: string) {
      * 순차로 두면 모든 문서 페이지가 왕복을 하나씩 더 지불한다 —
      * 이 앱에서 가장 신경 쓴 게 그 왕복 수다 (README 성능 메모 참고).
      */
-    const [access, found] = await Promise.all([
+    const [access, found, openComments] = await Promise.all([
       // 이미 가진 행을 넘겨 pages 재조회를 막는다
       resolvePageAccess(actor.userId, pageId, page),
       Collections.getCollectionForPage(actor, pageId),
+      countOpenThreads(actor, pageId),
     ])
     const canEdit = access?.level === 'edit' || access?.level === 'full'
+    // read 보다 위면 코멘트를 쓸 수 있다 (read < comment < edit < full)
+    const canComment = access !== null && access.level !== 'read'
+    // 공유(권한 부여)는 full 만. 이미 계산한 access 를 재사용하므로 왕복이 늘지 않는다
+    const canManage = access?.level === 'full'
 
     /**
      * 멤버 목록은 데이터베이스 페이지에서만 필요하다(사람 속성 렌더용).
@@ -45,7 +53,7 @@ async function loadPageView(actor: Actor, workspaceId: string, pageId: string) {
         ])
       : [null, []]
 
-    return { page, canEdit, found, table, members }
+    return { page, canEdit, canComment, canManage, found, table, members, openComments }
   } catch (err) {
     if (err instanceof DomainError) return null
     throw err
@@ -63,8 +71,24 @@ export default async function PageView({
   const data = await loadPageView(actor, workspace.id, pageId)
   if (!data) notFound()
 
-  const { page, canEdit, found, table, members } = data
+  const { page, canEdit, canComment, canManage, found, table, members, openComments } = data
   const isDatabase = Boolean(found && table)
+
+  /** 문서든 데이터베이스든 같은 자리에 두는 도구 모음 */
+  const toolbar = (
+    <div className="flex items-center justify-end gap-1">
+      {canManage && <SharePanel pageId={page.id} />}
+      <CommentPanel
+        pageId={page.id}
+        workspaceId={workspace.id}
+        canComment={canComment}
+        currentUserId={actor.userId}
+        openCount={openComments}
+      />
+      {/* 기록은 본문이 있는 문서에만 의미가 있다 */}
+      {!isDatabase && <VersionHistory pageId={page.id} canEdit={canEdit} />}
+    </div>
+  )
 
   return (
     <article className={`mx-auto px-12 py-16 ${isDatabase ? 'max-w-6xl' : 'max-w-3xl'}`}>
@@ -74,6 +98,8 @@ export default async function PageView({
         icon={page.icon}
         canEdit={canEdit}
       />
+
+      {toolbar}
 
       {found && table ? (
         <CollectionView
@@ -90,10 +116,6 @@ export default async function PageView({
         />
       ) : (
         <>
-          {/* 본문이 있는 문서에만 기록이 의미가 있다 */}
-          <div className="flex justify-end">
-            <VersionHistory pageId={page.id} canEdit={canEdit} />
-          </div>
           <EditorLoader
             pageId={page.id}
             workspaceId={workspace.id}
