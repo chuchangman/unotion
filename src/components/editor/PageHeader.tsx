@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { renamePage, setPageIcon } from '@/app/actions/pages'
 
 const QUICK_EMOJI = ['📄', '📝', '📌', '✅', '🚀', '🐛', '💡', '📊', '🗓️', '🔧']
@@ -18,11 +18,12 @@ export function PageHeader({ pageId, initialTitle, icon, canEdit }: Props) {
   const [showPicker, setShowPicker] = useState(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // pageId 가 바뀌면(다른 페이지로 이동) 로컬 상태를 서버 값으로 되돌린다
-  useEffect(() => {
-    setTitle(initialTitle)
-    setCurrent(icon)
-  }, [pageId, initialTitle, icon])
+  /**
+   * 다른 페이지로 이동하면 부모가 `key={pageId}` 로 이 컴포넌트를 다시 마운트하므로
+   * 서버 값을 다시 넘기는 이펙트가 필요 없다. 이펙트로 돌려놓으면 `icon` 이
+   * 객체 prop 이라 매 렌더 실행되어, 자동저장 후 router.refresh() 가
+   * **사용자가 치는 중인 제목을 서버 값으로 다시 덮는** 문제가 생긴다.
+   */
 
   function onTitleChange(value: string) {
     setTitle(value)

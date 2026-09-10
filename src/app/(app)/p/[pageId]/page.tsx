@@ -94,7 +94,13 @@ export default async function PageView({
 
   return (
     <article className={`mx-auto px-12 py-16 ${isDatabase ? 'max-w-6xl' : 'max-w-3xl'}`}>
+      {/*
+        key: 다른 페이지로 이동해도 같은 위치의 같은 컴포넌트라 React 가 상태를
+        그대로 재사용한다. 제목·아이콘·Yjs 문서는 페이지마다 새로 시작해야 하므로
+        pageId 로 리마운트를 강제한다 (PeekPanel 도 같은 방식이다).
+      */}
       <PageHeader
+        key={page.id}
         pageId={page.id}
         initialTitle={page.title}
         icon={page.icon}
@@ -119,6 +125,7 @@ export default async function PageView({
       ) : (
         <>
           <EditorLoader
+            key={page.id}
             pageId={page.id}
             workspaceId={workspace.id}
             title={page.title}

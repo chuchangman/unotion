@@ -21,6 +21,7 @@ import '@blocknote/mantine/style.css'
 import { createClient } from '@/lib/supabase/client'
 import { SupabaseYjsProvider, type ProviderStatus } from '@/lib/realtime/supabase-yjs-provider'
 import { blocksToPlainText, blocksToPageLinks } from '@/lib/blocks'
+import { resolveUpload } from '@/lib/upload'
 import { bytesToBase64, base64ToBytes } from '@/lib/base64'
 import { loadYdoc, savePage, searchPagesForLink, createLinkedChildPage, snapshotVersion } from '@/app/actions/pages'
 import { filterSuggestionItems } from '@blocknote/core/extensions'
@@ -34,7 +35,6 @@ const VERSION_SNAPSHOT_GAP_MS = 10 * 60 * 1000
 
 /** 본문에 붙는 이미지·파일 버킷 (drizzle/0003_storage.sql) */
 const FILE_BUCKET = 'page-files'
-const MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 /**
  * 파일을 스토리지에 올리고 **공개 URL** 을 돌려준다.
@@ -46,47 +46,104 @@ const MAX_UPLOAD_BYTES = 10 * 1024 * 1024
  *
  * 반환한 URL 은 본문 ydoc 안에 그대로 저장되므로 만료되면 안 된다.
  * 그래서 서명 URL 이 아니라 공개 URL 이다 (0003 의 설계 메모 참고).
+ *
+ * MIME 은 브라우저가 준 `file.type` 이 아니라 **확장자**로 정한다.
+ * 이유는 lib/upload.ts 주석에 있다 (윈도우에서 zip 업로드가 이것 때문에 깨졌다).
  */
 async function uploadToStorage(
   supabase: ReturnType<typeof createClient>,
   pageId: string,
   file: File,
 ): Promise<string> {
-  if (file.size > MAX_UPLOAD_BYTES) {
-    throw new Error(`파일이 너무 큽니다 (최대 10MB, 지금 ${(file.size / 1024 / 1024).toFixed(1)}MB)`)
+  try {
+    const { ext, contentType } = resolveUpload(file)
+    const path = `${pageId}/${crypto.randomUUID()}${ext ? `.${ext}` : ''}`
+
+    const { error } = await supabase.storage.from(FILE_BUCKET).upload(path, file, {
+      contentType,
+      // 경로에 uuid 가 있어 내용이 바뀌지 않는다 — 오래 캐시해도 안전하다
+      cacheControl: '31536000',
+      upsert: false,
+    })
+
+    if (error) {
+      // 버킷의 allowed_mime_types / file_size_limit 에 걸린 경우가 대부분이다
+      throw new Error(`업로드 실패: ${error.message}`)
+    }
+
+    return supabase.storage.from(FILE_BUCKET).getPublicUrl(path).data.publicUrl
+  } catch (err) {
+    /**
+     * BlockNote 는 uploadFile 이 던진 예외를 **삼키고** "Error: Upload failed" 만
+     * 띄운다 (@blocknote/react 의 catch 절). 이유를 알려주는 건 우리 몫이다 —
+     * zip 이 막혔을 때도 사용자는 원인 없는 에러만 봤다.
+     * 사이드바가 실패를 알리는 방식(alert)과 같게 맞춘다.
+     */
+    alert(err instanceof Error ? err.message : '업로드에 실패했습니다')
+    throw err
   }
-
-  const ext = (file.name.split('.').pop() ?? '').toLowerCase().replace(/[^a-z0-9]/g, '')
-  const path = `${pageId}/${crypto.randomUUID()}${ext ? `.${ext}` : ''}`
-
-  const { error } = await supabase.storage.from(FILE_BUCKET).upload(path, file, {
-    contentType: file.type || 'application/octet-stream',
-    // 경로에 uuid 가 있어 내용이 바뀌지 않는다 — 오래 캐시해도 안전하다
-    cacheControl: '31536000',
-    upsert: false,
-  })
-
-  if (error) {
-    // 버킷의 allowed_mime_types / file_size_limit 에 걸린 경우가 대부분이다
-    throw new Error(`업로드 실패: ${error.message}`)
-  }
-
-  return supabase.storage.from(FILE_BUCKET).getPublicUrl(path).data.publicUrl
 }
 
 /**
- * 간격이 충분히 지났으면 되돌리기용 스냅샷을 요청한다.
+ * 자동저장 콜백이 읽고 쓰는 가변 상태.
  *
- * 컴포넌트 **밖에** 둔다. 안에 두면 호출부가 useMemo 안이라
- * 린터가 Date.now()/ref 접근을 렌더 단계 코드로 보고 막는다
- * (실제로는 저장 콜백에서 나중에 실행된다).
+ * 렌더 결과에는 안 쓰이고 저장 콜백에서만 읽고 쓴다. 나눠 놓을 이유가 없어
+ * ref 하나에 모아 두고, 그 ref 를 만지는 코드는 전부 이펙트 안에 둔다
+ * (렌더 단계에서 ref 를 건드리면 React 컴파일러가 막는다 — react-hooks/refs).
  */
-function maybeSnapshot(pageId: string, lastAt: { current: number }) {
+type SaveState = {
+  /** 파생 스냅샷(contentJson/plainText)의 출처. 에디터가 생긴 뒤 이펙트에서 연결한다 */
+  getBlocks: (() => unknown) | null
+  title: string
+  /** 마지막으로 서버에 보낸 링크 목록의 서명. null 이면 아직 안 보냈다는 뜻 */
+  lastLinks: string | null
+  /** 되돌리기 스냅샷을 남긴 시각. 0 으로 시작하므로 첫 저장은 항상 스냅샷을 남긴다 */
+  lastSnapshotAt: number
+}
+
+/**
+ * 저장 본체.
+ *
+ * 컴포넌트 **밖에** 둔다. provider 를 만드는 useMemo 는 렌더 단계 코드라
+ * 그 안에서 `ref.current` 를 읽으면 컴파일러가 "렌더 중 ref 접근"으로 막는다
+ * (실제로는 2초 뒤 저장 콜백에서 실행된다). ref 는 넘기기만 하고 값 읽기는 여기서 한다.
+ */
+async function saveUpdate(pageId: string, update: Uint8Array, st: SaveState) {
+  /**
+   * 저장 **직전에** 되돌리기용 스냅샷을 남긴다.
+   * 이 시점의 서버 ydoc 에는 아직 이번 편집이 반영되지 않았으므로,
+   * 결과적으로 "편집을 시작하기 직전 상태"가 버전으로 남는다.
+   *
+   * 서버 액션은 클라이언트당 순차 디스패치라 이 호출이 아래 savePage 보다
+   * 먼저 도착하는 것이 보장된다. 10분에 한 번만 부르고, 서버도 같은 간격으로
+   * 한 번 더 막는다 (여러 명이 같은 문서를 편집하는 경우).
+   */
   const now = Date.now()
-  if (now - lastAt.current <= VERSION_SNAPSHOT_GAP_MS) return
-  lastAt.current = now
-  // 스냅샷 실패가 저장을 막아서는 안 된다
-  snapshotVersion(pageId).catch(() => {})
+  if (now - st.lastSnapshotAt > VERSION_SNAPSHOT_GAP_MS) {
+    st.lastSnapshotAt = now
+    // 스냅샷 실패가 저장을 막아서는 안 된다
+    snapshotVersion(pageId).catch(() => {})
+  }
+
+  const blocks = st.getBlocks?.() ?? null
+
+  /**
+   * 백링크용 링크 목록은 **바뀌었을 때만** 실어 보낸다.
+   * 매 저장(2초)마다 보내면 서버가 링크 테이블을 지웠다 다시 넣느라
+   * 쓰기 왕복이 두 개씩 늘어난다.
+   */
+  const links = blocksToPageLinks(blocks)
+  const signature = links.join(',')
+  const linksChanged = signature !== st.lastLinks
+  if (linksChanged) st.lastLinks = signature
+
+  const res = await savePage(pageId, {
+    ydocB64: bytesToBase64(update),
+    plainText: blocksToPlainText(blocks),
+    title: st.title,
+    ...(linksChanged ? { links } : {}),
+  })
+  if (!res.ok) console.error('[editor] 저장 실패', res.message)
 }
 
 function colorFor(id: string) {
@@ -108,26 +165,27 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
   const [status, setStatus] = useState<ProviderStatus>('connecting')
   const [ready, setReady] = useState(false)
 
-  const doc = useMemo(() => new Y.Doc(), [pageId])
-  const supabase = useMemo(() => createClient(), [])
+  /**
+   * 마운트당 한 번만 만든다. 페이지가 바뀔 때 새 문서가 필요한 것은 맞지만,
+   * 그건 부모가 `key={pageId}` 로 리마운트해서 해결한다 — useMemo 의 의존성으로
+   * 흉내 내면 React 가 캐시를 버릴 때 문서가 갈리고, 린터도 쓰지 않는 의존성으로 잡는다.
+   */
+  const [doc] = useState(() => new Y.Doc())
+  const [supabase] = useState(() => createClient())
 
   /**
-   * 저장 시 파생 스냅샷(contentJson/plainText)이 필요한데 그 출처는 에디터다.
-   * 프로바이더가 에디터보다 먼저 만들어져야 하므로(BlockNote 가 provider 를 받는다)
-   * ref 로 순환을 끊는다.
+   * 저장 시 파생 스냅샷이 필요한데 그 출처는 에디터다. 프로바이더가 에디터보다
+   * 먼저 만들어져야 하므로(BlockNote 가 provider 를 받는다) ref 로 순환을 끊는다.
    */
-  const getBlocks = useRef<(() => unknown) | null>(null)
-  const titleRef = useRef(title)
-  titleRef.current = title
+  const saveState = useRef<SaveState>({
+    getBlocks: null,
+    title,
+    lastLinks: null,
+    lastSnapshotAt: 0,
+  })
 
-  /**
-   * 되돌리기용 스냅샷 간격. 0 으로 시작하므로 **이 문서의 첫 저장은 항상 스냅샷을 남긴다**
-   * — 편집을 시작하기 직전 상태가 그때 박제된다.
-   */
-  const lastSnapshotAt = useRef(0)
-
-  /** 마지막으로 서버에 보낸 링크 목록의 서명. 빈 문자열이면 아직 안 보냈다는 뜻 */
-  const lastLinks = useRef<string | null>(null)
+  // 초기값이 이미 title 이므로 이 이펙트는 "이후 변경"만 따라간다
+  useEffect(() => { saveState.current.title = title }, [title])
 
   const provider = useMemo(() => new SupabaseYjsProvider({
     supabase,
@@ -143,39 +201,19 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
       }
       return res.data ? base64ToBytes(res.data) : null
     },
-    save: async (update) => {
-      /**
-       * 저장 **직전에** 되돌리기용 스냅샷을 남긴다.
-       * 이 시점의 서버 ydoc 에는 아직 이번 편집이 반영되지 않았으므로,
-       * 결과적으로 "편집을 시작하기 직전 상태"가 버전으로 남는다.
-       *
-       * 서버 액션은 클라이언트당 순차 디스패치라 이 호출이 아래 savePage 보다
-       * 먼저 도착하는 것이 보장된다. 10분에 한 번만 부르고, 서버도 같은 간격으로
-       * 한 번 더 막는다 (여러 명이 같은 문서를 편집하는 경우).
-       */
-      maybeSnapshot(pageId, lastSnapshotAt)
-
-      const blocks = getBlocks.current?.() ?? null
-
-      /**
-       * 백링크용 링크 목록은 **바뀌었을 때만** 실어 보낸다.
-       * 매 저장(2초)마다 보내면 서버가 링크 테이블을 지웠다 다시 넣느라
-       * 쓰기 왕복이 두 개씩 늘어난다.
-       */
-      const links = blocksToPageLinks(blocks)
-      const signature = links.join(',')
-      const linksChanged = signature !== lastLinks.current
-      if (linksChanged) lastLinks.current = signature
-
-      const res = await savePage(pageId, {
-        ydocB64: bytesToBase64(update),
-        plainText: blocksToPlainText(blocks),
-        title: titleRef.current,
-        ...(linksChanged ? { links } : {}),
-      })
-      if (!res.ok) console.error('[editor] 저장 실패', res.message)
-    },
   }), [supabase, pageId, doc, user.id, user.name])
+
+  /**
+   * 저장 콜백을 꽂는다.
+   *
+   * 생성자에 넣지 못하는 이유는 프로바이더의 `saveFn` 주석에 있다. 이 이펙트는
+   * connect() 이펙트보다 **위에** 선언되어 있어 항상 먼저 실행되고,
+   * 저장은 최소 3초 디바운스라 콜백 없이 저장 시점이 오는 일은 없다.
+   */
+  useEffect(() => {
+    const st = saveState.current
+    provider.setSave((update) => saveUpdate(pageId, update, st))
+  }, [provider, pageId])
 
   // BlockNote 0.54: 협업은 @blocknote/core/yjs 의 withCollaboration 으로 주입한다.
   // provider 는 객체 전체가 아니라 awareness 만 넘긴다.
@@ -237,8 +275,9 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
 
   // 에디터가 생기면 파생 스냅샷 게터를 연결한다
   useEffect(() => {
-    getBlocks.current = () => editor.document
-    return () => { getBlocks.current = null }
+    const st = saveState.current
+    st.getBlocks = () => editor.document
+    return () => { st.getBlocks = null }
   }, [editor])
 
   // 오프라인 보존 + 재접속 시 자동 머지
@@ -409,8 +448,8 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
   ], [workspaceId, pageId, insertPageLink, router, editor])
 
   // 탭 닫힘 / 백그라운드 전환 시 마지막 저장
-  const flush = useCallback(() => { void provider.flush() }, [provider])
   useEffect(() => {
+    const flush = () => { void provider.flush() }
     const onHidden = () => { if (document.visibilityState === 'hidden') flush() }
     window.addEventListener('pagehide', flush)
     document.addEventListener('visibilitychange', onHidden)
@@ -418,7 +457,7 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
       window.removeEventListener('pagehide', flush)
       document.removeEventListener('visibilitychange', onHidden)
     }
-  }, [flush])
+  }, [provider])
 
   return (
     <div className="relative">

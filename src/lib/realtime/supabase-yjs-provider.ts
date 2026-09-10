@@ -43,14 +43,22 @@ export type SupabaseYjsProviderOptions = {
   pageId: string
   doc: Y.Doc
   user: ProviderUser
-  /** 서버에 전체 상태를 저장한다 (server action) */
-  save: (update: Uint8Array) => Promise<void>
   /** 서버에서 스냅샷을 읽는다. 없으면 null */
   load: () => Promise<Uint8Array | null>
   onStatus?: (status: ProviderStatus) => void
 }
 
 export class SupabaseYjsProvider {
+  /**
+   * 서버에 전체 상태를 저장한다 (server action).
+   *
+   * 생성자가 아니라 **마운트 후에 꽂는다.** 저장 콜백은 에디터에서 파생 스냅샷을
+   * 꺼내야 해서 ref 를 읽는데, 프로바이더를 만드는 코드는 렌더 단계라 그 안에서
+   * ref 를 건드리면 React 컴파일러가 막는다 (react-hooks/refs).
+   * 안 꽂힌 상태로 저장 시점이 오면 버리지 않고 다시 예약한다.
+   */
+  private saveFn: ((update: Uint8Array) => Promise<void>) | null = null
+
   readonly awareness: Awareness
   private channel: RealtimeChannel | null = null
   private saveTimer: ReturnType<typeof setTimeout> | null = null
@@ -191,6 +199,13 @@ export class SupabaseYjsProvider {
 
   private async persist() {
     if (this.destroyed) return
+
+    // 저장 콜백이 아직 안 꽂혔다 — 변경분을 버리지 않고 잠시 뒤 다시 시도한다
+    if (!this.saveFn) {
+      this.saveTimer = setTimeout(() => { void this.persist() }, SAVE_DEBOUNCE_MS)
+      return
+    }
+
     this.firstPendingAt = null
 
     const update = Y.encodeStateAsUpdate(this.opts.doc)
@@ -198,11 +213,16 @@ export class SupabaseYjsProvider {
     if (update.byteLength === this.lastSavedLen) return
 
     try {
-      await this.opts.save(update)
+      await this.saveFn(update)
       this.lastSavedLen = update.byteLength
     } catch (err) {
       console.error('[yjs] 서버 저장 실패', err)
     }
+  }
+
+  /** 저장 콜백을 꽂는다. 이유는 `saveFn` 의 주석 참고 */
+  setSave(fn: (update: Uint8Array) => Promise<void>) {
+    this.saveFn = fn
   }
 
   /** 탭을 닫기 전 마지막 저장 */

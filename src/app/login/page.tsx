@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { Suspense, useState } from 'react'
+import { useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 
 /**
@@ -12,12 +13,6 @@ export default function LoginPage() {
   const [state, setState] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle')
   const [message, setMessage] = useState('')
   const [showEmail, setShowEmail] = useState(false)
-
-  // /auth/callback 이 실패하면 ?error= 를 달고 여기로 되돌린다.
-  useEffect(() => {
-    const err = new URLSearchParams(window.location.search).get('error')
-    if (err) { setState('error'); setMessage(err) }
-  }, [])
 
   const nextPath = () =>
     new URLSearchParams(window.location.search).get('next') ?? '/'
@@ -59,11 +54,17 @@ export default function LoginPage() {
         <h1 className="mb-1 text-2xl font-semibold tracking-tight">팀 위키</h1>
         <p className="mb-8 text-sm text-neutral-500">회사 Google 계정으로 로그인하세요.</p>
 
-        {state === 'error' && (
-          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
-            {message}
-          </div>
-        )}
+        {/*
+          /auth/callback 이 실패하면 ?error= 를 달고 여기로 되돌린다.
+          useSearchParams 는 프리렌더된 라우트에서 **가장 가까운 Suspense 경계까지**
+          클라이언트 렌더로 돌린다. 배너만 경계 안에 두면 나머지 화면은 정적으로 남는다
+          (이펙트 + setState 로 읽으면 렌더가 한 번 더 연쇄된다).
+        */}
+        <Suspense fallback={null}>
+          <CallbackError />
+        </Suspense>
+
+        {state === 'error' && <ErrorBanner>{message}</ErrorBanner>}
 
         {state === 'sent' ? (
           <div className="rounded-lg border border-neutral-200 bg-white p-4 text-sm dark:border-neutral-800 dark:bg-neutral-900">
@@ -115,6 +116,21 @@ export default function LoginPage() {
         )}
       </div>
     </main>
+  )
+}
+
+/** ?error= 로 실려 온 콜백 실패 메시지 */
+function CallbackError() {
+  const error = useSearchParams().get('error')
+  if (!error) return null
+  return <ErrorBanner>{error}</ErrorBanner>
+}
+
+function ErrorBanner({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+      {children}
+    </div>
   )
 }
 

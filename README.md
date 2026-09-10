@@ -79,6 +79,7 @@ cp .env.example .env.local
 2) drizzle/0001_constraints_and_search.sql 자기참조 FK + 한글 검색 인덱스
 3) drizzle/0002_rls.sql                    RLS 정책 + Realtime 채널 권한
 4) drizzle/0003_storage.sql                 파일 업로드 버킷 + 스토리지 정책
+5) drizzle/0004_storage_mime.sql            업로드 MIME 목록 정정 (아래 메모)
 ```
 
 > `0001` / `0002` 는 drizzle-kit 이 만들지 못하는 것들(순환 FK, 트리거, RLS,
@@ -173,7 +174,9 @@ GitHub → Settings → Secrets and variables → Actions 에서 등록한다.
 | `legacy-peer-deps=true` (`.npmrc`) | BlockNote 0.54 가 신 `@y/*`(RC)와 구 `yjs@13`(안정)을 모두 optional peer 로 잡는데, `@y/protocols@1.0.6-rc.1` 이 `@y/y@*` 를 요구하고 `*` 는 프리릴리스를 매치하지 않아 신 라인이 설치 불가다. 팀 지식베이스에 RC CRDT 를 깔지 않기 위해 안정판으로 고정했다. Vercel 빌드도 같은 해석을 쓰도록 커밋한다 |
 | dev 전용 취약점 4건 (moderate) | `drizzle-kit` 내부 esbuild. 프로덕션 의존성은 0건이며 배포물에 포함되지 않는다 |
 | **업로드 파일은 URL 만 알면 누구나 본다** | 공개 버킷이다. 파일 URL 이 본문 ydoc 안에 박히는데, 비공개 버킷의 서명 URL 은 만료돼서 시간이 지나면 문서마다 이미지가 깨진다. 경로에 UUID 를 넣어 추측은 막았고 **업로드**는 그 페이지 권한이 있어야 한다. 기밀 파일은 붙이지 말 것 (`drizzle/0003_storage.sql`) |
-| SVG 업로드 차단 | SVG 는 스크립트를 품을 수 있고 버킷이 공개다. 스토리지는 앱과 다른 오리진이라 앱 쿠키까지 새지는 않지만 굳이 열지 않았다. 필요하면 `0003` 의 `allowed_mime_types` 에 추가 |
+| SVG · HTML 업로드 차단 | 둘 다 스크립트를 품을 수 있고 버킷이 공개다. 스토리지는 앱과 다른 오리진이라 앱 쿠키까지 새지는 않지만, 우리 파일처럼 보이는 페이지를 올릴 수 있어 막았다. 목록에 없는 확장자는 `application/octet-stream` 으로 올라가 **내려받기만** 된다 (`src/lib/upload.ts` + `drizzle/0004_storage_mime.sql`) |
+| 업로드 MIME 은 확장자로 정한다 | 브라우저의 `file.type` 을 믿으면 안 된다. 윈도우 크롬은 MIME 을 레지스트리에서 읽어서 `.zip` 을 `application/x-zip-compressed`, `.csv` 를 `application/vnd.ms-excel` 로 보내고 `.md` 는 빈 값으로 보낸다. 표준 이름으로 적힌 버킷 목록에 걸려 셋 다 415 로 거부됐다 — 그래서 `src/lib/upload.ts` 에서 확장자로 정규화한 뒤 올린다. **표를 고치면 `0004` 도 같이 고쳐야 한다** |
+| 지운 파일은 스토리지에 남는다 | 블록이나 페이지를 지워도 스토리지 오브젝트는 안 지운다. 본문(ydoc)이 URL 을 들고 있어 "이 파일을 아직 쓰는 문서가 있나"를 알려면 전 문서를 훑어야 하기 때문이다. 무료 티어 1GB 라 당장은 문제없지만, 커지면 주기적으로 쓸어내는 작업이 필요하다 |
 | 웹 공개 페이지는 **슬러그가 곧 열쇠** | `/share/<128비트 난수>` 를 아는 사람은 로그인 없이 읽는다. 목록 API 가 없어 추측 외에는 도달할 수 없고, 공개한 그 페이지 하나만 나간다(하위 페이지 제외). 본문은 `sanitizeHtml` 을 거치지만 근본 방어는 슬러그의 비밀성이다 — 유출되면 즉시 "공개 중지" 해야 한다 |
 
 ## 성능 메모

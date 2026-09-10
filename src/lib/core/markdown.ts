@@ -10,7 +10,6 @@
  */
 import 'server-only'
 import * as Y from 'yjs'
-import type { ServerBlockNoteEditor } from '@blocknote/server-util'
 
 /** Editor.tsx 의 doc.getXmlFragment('blocknote') 와 반드시 같아야 한다 */
 export const FRAGMENT = 'blocknote'

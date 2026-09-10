@@ -25,7 +25,7 @@ function Icon({ icon }: { icon: Child['icon'] }) {
 /** 보드 한 칸: 제목 + 하위 페이지 목록 + 새 페이지 버튼 */
 function BoardColumnView({
   column,
-  children,
+  childPages,
   workspaceId,
   editable,
   onOpen,
@@ -33,7 +33,7 @@ function BoardColumnView({
 }: {
   column: BoardColumn
   /** null 이면 아직 로딩 중 */
-  children: Child[] | null
+  childPages: Child[] | null
   workspaceId: string
   editable: boolean
   onOpen: (pageId: string) => void
@@ -69,14 +69,14 @@ function BoardColumnView({
       </button>
 
       <div className="space-y-px">
-        {children === null && (
+        {childPages === null && (
           <>
             <div className="h-7 animate-pulse rounded bg-neutral-100 dark:bg-neutral-800" />
             <div className="h-7 w-4/5 animate-pulse rounded bg-neutral-100 dark:bg-neutral-800" />
           </>
         )}
 
-        {children?.map((c) => (
+        {childPages?.map((c) => (
           <button
             key={c.id}
             type="button"
@@ -88,7 +88,7 @@ function BoardColumnView({
           </button>
         ))}
 
-        {children?.length === 0 && (
+        {childPages?.length === 0 && (
           <p className="px-1.5 py-1 text-sm text-neutral-400">아직 페이지가 없습니다</p>
         )}
 
@@ -214,7 +214,7 @@ export const PageBoardBlock = createReactBlockSpec(
               <div className="min-w-0 flex-1">
                 <BoardColumnView
                   column={col}
-                  children={lists ? (lists[col.pageId] ?? []) : null}
+                  childPages={lists ? (lists[col.pageId] ?? []) : null}
                   workspaceId={workspaceId}
                   editable={editable}
                   onOpen={open}

@@ -32,9 +32,6 @@ export function PeekPanel({
   const params = useSearchParams()
   const peekId = params.get('peek')
 
-  const [page, setPage] = useState<Preview | null>(null)
-  const [error, setError] = useState('')
-
   const close = useCallback(() => {
     const next = new URLSearchParams(params.toString())
     next.delete('peek')
@@ -42,15 +39,40 @@ export function PeekPanel({
     router.push(qs ? `${pathname}?${qs}` : pathname, { scroll: false })
   }, [params, pathname, router])
 
-  const openFull = useCallback(() => {
-    if (peekId) router.push(`/p/${peekId}`)
-  }, [peekId, router])
+  if (!peekId) return null
+
+  /**
+   * key: 미리보기 대상이 바뀌면 로딩·에러 상태와 Yjs 문서를 새로 시작해야 한다.
+   * 이펙트에서 setState 로 되돌리면 렌더 연쇄가 생기므로 리마운트로 처리한다.
+   */
+  return (
+    <PeekBody
+      key={peekId}
+      peekId={peekId}
+      workspaceId={workspaceId}
+      user={user}
+      onClose={close}
+    />
+  )
+}
+
+function PeekBody({
+  peekId,
+  workspaceId,
+  user,
+  onClose,
+}: {
+  peekId: string
+  workspaceId: string
+  user: { id: string; name: string }
+  onClose: () => void
+}) {
+  const router = useRouter()
+  const [page, setPage] = useState<Preview | null>(null)
+  const [error, setError] = useState('')
 
   useEffect(() => {
-    if (!peekId) { setPage(null); setError(''); return }
     let cancelled = false
-    setPage(null)
-    setError('')
     void getPagePreview(peekId).then((res) => {
       if (cancelled) return
       if (res.ok) setPage(res.data)
@@ -60,19 +82,16 @@ export function PeekPanel({
   }, [peekId])
 
   useEffect(() => {
-    if (!peekId) return
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close() }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [peekId, close])
-
-  if (!peekId) return null
+  }, [onClose])
 
   return (
     <>
       <div
         className="fixed inset-0 z-40 bg-black/20 dark:bg-black/40"
-        onClick={close}
+        onClick={onClose}
         aria-hidden
       />
 
@@ -85,7 +104,7 @@ export function PeekPanel({
         <header className="flex shrink-0 items-center justify-between border-b border-neutral-200 px-3 py-2 dark:border-neutral-800">
           <button
             type="button"
-            onClick={openFull}
+            onClick={() => router.push(`/p/${peekId}`)}
             className="flex items-center gap-1.5 rounded px-2 py-1 text-xs text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
           >
             <Maximize2 className="size-3.5" />
@@ -93,7 +112,7 @@ export function PeekPanel({
           </button>
           <button
             type="button"
-            onClick={close}
+            onClick={onClose}
             aria-label="닫기"
             className="rounded p-1.5 text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
           >
@@ -117,8 +136,7 @@ export function PeekPanel({
           )}
 
           {page && (
-            /* key 로 페이지가 바뀔 때 에디터와 Yjs 문서를 확실히 새로 만든다 */
-            <div key={page.id}>
+            <div>
               <PageHeader
                 pageId={page.id}
                 initialTitle={page.title}
