@@ -56,10 +56,11 @@ async function uploadToStorage(
   file: File,
 ): Promise<string> {
   try {
-    const { ext, contentType } = resolveUpload(file)
+    const { ext, contentType, body } = resolveUpload(file)
     const path = `${pageId}/${crypto.randomUUID()}${ext ? `.${ext}` : ''}`
 
-    const { error } = await supabase.storage.from(FILE_BUCKET).upload(path, file, {
+    // body 는 MIME 을 정규화해 다시 감싼 파일이다 (lib/upload.ts 주석 참고)
+    const { error } = await supabase.storage.from(FILE_BUCKET).upload(path, body, {
       contentType,
       // 경로에 uuid 가 있어 내용이 바뀌지 않는다 — 오래 캐시해도 안전하다
       cacheControl: '31536000',

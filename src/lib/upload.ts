@@ -85,10 +85,14 @@ export function extensionOf(filename: string): string {
 }
 
 /**
- * 올려도 되는 파일인지 확인하고, 저장할 확장자와 MIME 을 정한다.
+ * 올려도 되는 파일인지 확인하고, 저장할 확장자·MIME 과 **올릴 본문**을 정한다.
  * 거부는 예외로 알린다 — 메시지가 그대로 사용자에게 보인다.
  */
-export function resolveUpload(file: File): { ext: string; contentType: string } {
+export function resolveUpload(file: File): {
+  ext: string
+  contentType: string
+  body: File
+} {
   if (file.size > MAX_UPLOAD_BYTES) {
     const mb = (file.size / 1024 / 1024).toFixed(1)
     throw new Error(`파일이 너무 큽니다 (최대 10MB, 지금 ${mb}MB)`)
@@ -100,5 +104,21 @@ export function resolveUpload(file: File): { ext: string; contentType: string } 
     throw new Error(`.${ext} 파일은 올릴 수 없습니다 — 브라우저에서 실행될 수 있는 형식입니다`)
   }
 
-  return { ext, contentType: EXTENSION_MIME[ext] ?? FALLBACK_MIME }
+  const contentType = EXTENSION_MIME[ext] ?? FALLBACK_MIME
+
+  /**
+   * ★ 옵션이 아니라 **파일 자체**를 다시 감싼다.
+   *
+   *   supabase-js 는 Blob/File 을 넘기면 FormData 로 감싸서 보내는데, 그 분기는
+   *   `upload(..., { contentType })` 을 **쓰지 않는다** (storage-js 의
+   *   uploadOrUpdate: Blob 분기에는 headers['content-type'] 세팅이 없다).
+   *   멀티파트 각 파트의 Content-Type 은 브라우저가 File.type 에서 가져간다.
+   *   그래서 옵션만 고치면 정규화한 값이 서버까지 가지 않는다 —
+   *   실제로 이것 때문에 zip 이 두 번 거부됐다.
+   */
+  const body = file.type === contentType
+    ? file
+    : new File([file], file.name, { type: contentType, lastModified: file.lastModified })
+
+  return { ext, contentType, body }
 }
