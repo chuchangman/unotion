@@ -31,7 +31,20 @@ const nextConfig: NextConfig = {
    * 그래서 번들시키고, 빌드 타임 createContext 오류는
    * lib/core/markdown.ts 의 지연 import 로 회피한다.
    */
-  /* config options here */
+  /**
+   * 동적 라우트의 클라이언트 캐시(Router Cache) 수명.
+   *
+   * Next 15 부터 dynamic 기본값이 0 이라 **뒤로가기조차 매번 서버 왕복**이었다.
+   * 문서를 오가는 동작이 팀 위키에서 가장 잦은 경로라 30초를 준다 —
+   * 방금 본 문서로 돌아가는 건 즉시 그려진다.
+   *
+   * 대가: 다른 사람이 30초 안에 고친 제목·코멘트 수 같은 서버 렌더 값이
+   * 즉시 안 보일 수 있다. 본문 자체는 Yjs 로 실시간 동기화되므로 영향 없고,
+   * 뮤테이션은 revalidatePath 로 캐시를 즉시 무효화한다.
+   */
+  experimental: {
+    staleTimes: { dynamic: 30 },
+  },
 };
 
 export default nextConfig;

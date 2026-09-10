@@ -33,6 +33,14 @@ export function PageTree({ workspaceId, nodes }: Props) {
       return next
     })
 
+  /**
+   * 펼치기만 한다 (토글이 아니다).
+   * 하위 문서를 만들 때 toggle 을 쓰면 **이미 펼쳐진 노드가 접혀버린다** —
+   * 방금 만든 문서가 화면에서 사라지는 것처럼 보였다.
+   */
+  const expand = (id: string) =>
+    setExpanded((prev) => (prev.has(id) ? prev : new Set(prev).add(id)))
+
   return (
     <div className="space-y-px">
       {(byParent.get(null) ?? []).map((node) => (
@@ -43,6 +51,7 @@ export function PageTree({ workspaceId, nodes }: Props) {
           byParent={byParent}
           expanded={expanded}
           onToggle={toggle}
+          onExpand={expand}
           workspaceId={workspaceId}
         />
       ))}
@@ -56,27 +65,40 @@ type RowProps = {
   byParent: Map<string | null, TreeNode[]>
   expanded: Set<string>
   onToggle: (id: string) => void
+  onExpand: (id: string) => void
   workspaceId: string
 }
 
-function Row({ node, depth, byParent, expanded, onToggle, workspaceId }: RowProps) {
+function Row({ node, depth, byParent, expanded, onToggle, onExpand, workspaceId }: RowProps) {
   const params = useParams<{ pageId?: string }>()
   const router = useRouter()
   const [pending, start] = useTransition()
+  const [creating, setCreating] = useState(false)
   const isOpen = expanded.has(node.id)
   const isActive = params?.pageId === node.id
   const children = byParent.get(node.id) ?? []
 
-  const addChild = () =>
+  /**
+   * 하위 문서 만들기.
+   *
+   * 새 문서의 id 를 알아야 이동할 수 있으니 액션 왕복 한 번은 못 줄인다.
+   * 대신 **클릭 즉시** 부모를 펼치고 자리표시 행을 그려서, 기다리는 동안
+   * 아무 반응이 없던 문제(행이 opacity-50 으로 멈춰 있기만 했다)를 없앤다.
+   * 이동한 뒤 화면은 loading.tsx 골격이 즉시 받는다.
+   */
+  const addChild = () => {
+    onExpand(node.id)
+    setCreating(true)
     start(async () => {
       const res = await createPage({ workspaceId, parentId: node.id })
       if (res.ok) {
-        onToggle(node.id)
         router.push(`/p/${res.data.id}`)
       } else {
+        setCreating(false)
         alert(res.message)
       }
     })
+  }
 
   const remove = () =>
     start(async () => {
@@ -140,9 +162,21 @@ function Row({ node, depth, byParent, expanded, onToggle, workspaceId }: RowProp
           byParent={byParent}
           expanded={expanded}
           onToggle={onToggle}
+          onExpand={onExpand}
           workspaceId={workspaceId}
         />
       ))}
+
+      {/* 서버가 새 문서를 돌려주기 전까지 자리를 잡아 둔다 */}
+      {creating && (
+        <div
+          className="flex items-center gap-1.5 rounded py-1 text-sm text-neutral-400"
+          style={{ paddingLeft: (depth + 1) * 12 + 24 }}
+        >
+          <FileText className="size-3.5" />
+          <span>만드는 중...</span>
+        </div>
+      )}
     </>
   )
 }

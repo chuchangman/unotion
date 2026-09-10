@@ -1,6 +1,7 @@
 'use client'
 
 import { useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { renamePage, setPageIcon } from '@/app/actions/pages'
 
 const QUICK_EMOJI = ['📄', '📝', '📌', '✅', '🚀', '🐛', '💡', '📊', '🗓️', '🔧']
@@ -17,6 +18,9 @@ export function PageHeader({ pageId, initialTitle, icon, canEdit }: Props) {
   const [current, setCurrent] = useState(icon)
   const [showPicker, setShowPicker] = useState(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const router = useRouter()
+  /** 저장한 제목이 사이드바에 아직 안 반영됐는지 */
+  const treeStale = useRef(false)
 
   /**
    * 다른 페이지로 이동하면 부모가 `key={pageId}` 로 이 컴포넌트를 다시 마운트하므로
@@ -27,11 +31,34 @@ export function PageHeader({ pageId, initialTitle, icon, canEdit }: Props) {
 
   function onTitleChange(value: string) {
     setTitle(value)
+    treeStale.current = true
     if (timer.current) clearTimeout(timer.current)
     timer.current = setTimeout(async () => {
       const res = await renamePage(pageId, value)
       if (!res.ok) console.error('[header] 제목 저장 실패', res.message)
     }, 600)
+  }
+
+  /**
+   * 입력이 끝났을 때 한 번만 사이드바를 맞춘다.
+   *
+   * renamePage 는 일부러 revalidate 를 하지 않는다 (그 액션의 주석 참고) —
+   * 타이핑마다 앱 전체 캐시를 날리는 대신, 여기서 딱 한 번 새로고침한다.
+   * 아직 디바운스가 남아 있으면 먼저 저장을 끝낸 뒤 부른다.
+   */
+  async function flushTitle() {
+    if (!treeStale.current) return
+    treeStale.current = false
+    if (timer.current) {
+      clearTimeout(timer.current)
+      timer.current = null
+      const res = await renamePage(pageId, title)
+      if (!res.ok) {
+        console.error('[header] 제목 저장 실패', res.message)
+        return
+      }
+    }
+    router.refresh()
   }
 
   async function pick(emoji: string | null) {
@@ -80,6 +107,7 @@ export function PageHeader({ pageId, initialTitle, icon, canEdit }: Props) {
       <input
         value={title}
         onChange={(e) => onTitleChange(e.target.value)}
+        onBlur={() => { void flushTitle() }}
         readOnly={!canEdit}
         placeholder="제목 없음"
         className="w-full bg-transparent text-4xl font-bold tracking-tight outline-none placeholder:text-neutral-300 dark:placeholder:text-neutral-600"

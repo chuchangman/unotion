@@ -76,6 +76,18 @@ export async function createPage(input: {
   })
 }
 
+/**
+ * 제목 저장.
+ *
+ * ★ 여기서는 revalidatePath 를 부르지 않는다.
+ *   이 액션은 제목을 치는 동안 600ms 마다 호출되는데,
+ *   `revalidatePath('/', 'layout')` 은 **앱 전체의 클라이언트 캐시를 날린다.**
+ *   타이핑 중에 그걸 반복하면 사이드바 트리가 계속 다시 조회·렌더되고,
+ *   staleTimes 로 켜 둔 캐시도 매번 무의미해진다.
+ *
+ *   화면에 보이는 제목은 PageHeader 의 로컬 상태가 이미 즉시 반영하고,
+ *   사이드바는 입력이 끝났을 때(포커스 해제) PageHeader 가 한 번 refresh 한다.
+ */
 export async function renamePage(
   pageId: string,
   title: string,
@@ -83,7 +95,6 @@ export async function renamePage(
   return run(async () => {
     const actor = await requireActor()
     await Pages.updatePageMeta(actor, pageId, { title })
-    revalidatePath('/', 'layout')
     return null
   })
 }
