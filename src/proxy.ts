@@ -65,6 +65,16 @@ export const config = {
     // (본문에서 어차피 즉시 통과시키지만, 그래도 람다가 한 번 뜬다 —
     //  실측 CDN 69ms vs proxy 통과 158ms)
     // mcp 는 Bearer 토큰으로 자체 인증하므로 쿠키 미들웨어가 필요 없다.
-    '/((?!_next/static|_next/image|favicon.ico|login|share|mcp|api/mcp|.*\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+    //
+    // ★ api/transcribe 도 뺀다 — 여기의 미인증 처리가 **리다이렉트**이기 때문이다.
+    //   fetch 는 307 을 자동으로 따라가서 로그인 HTML 을 200 으로 받고, 호출부는
+    //   `res.ok` 가 true 니까 성공으로 알고 `res.json()` 에서 터진다. 회의 받아쓰기는
+    //   백그라운드로 도는 호출이라 그 예외가 아무 데도 안 보이고 받아쓰기만 조용히 멎는다.
+    //   (액세스 토큰은 기본 1시간에 만료되므로 긴 회의에서 실제로 닿는 경로다.)
+    //
+    //   대신 라우트가 getActor() 로 직접 인증하고 401 JSON 을 돌려준다. 세션 갱신도
+    //   그대로 된다 — 라우트 핸들러는 서버 컴포넌트와 달리 쿠키를 쓸 수 있어서
+    //   lib/supabase/server.ts 의 setAll 이 실제로 동작한다.
+    '/((?!_next/static|_next/image|favicon.ico|login|share|mcp|api/mcp|api/transcribe|.*\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
   ],
 }

@@ -22,6 +22,8 @@ import { createClient } from '@/lib/supabase/client'
 import { SupabaseYjsProvider, type ProviderStatus } from '@/lib/realtime/supabase-yjs-provider'
 import { blocksToPlainText, blocksToPageLinks } from '@/lib/blocks'
 import { resolveUpload } from '@/lib/upload'
+import { formatOffset } from '@/lib/transcribe'
+import { MeetingRecorder } from './MeetingRecorder'
 import { bytesToBase64, base64ToBytes } from '@/lib/base64'
 import { loadYdoc, savePage, searchPagesForLink, createLinkedChildPage, snapshotVersion } from '@/app/actions/pages'
 import { filterSuggestionItems } from '@blocknote/core/extensions'
@@ -328,6 +330,72 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
   )
 
   /**
+   * 회의 받아쓰기가 적히는 자리.
+   *
+   * 마지막으로 넣은 블록 id 를 들고 있다가 다음 구간을 그 **뒤에** 붙인다.
+   * 커서를 기준으로 하면 안 된다 — 녹음 중에도 사람들은 문서를 돌아다니고,
+   * 그때마다 받아쓴 글이 엉뚱한 곳에 끼어든다.
+   */
+  const meetingAnchor = useRef<string | null>(null)
+
+  /**
+   * 이어 붙일 기준 블록.
+   *
+   * 앵커가 사라졌을 수 있다 — 같이 보던 사람이 지웠거나, 되돌리기를 했거나.
+   * 그때는 문서 끝으로 떨어진다. 회의 중에 예외로 죽는 것보다 낫다.
+   */
+  const meetingTarget = useCallback(() => {
+    const anchor = meetingAnchor.current
+    if (anchor && editor.getBlock(anchor)) return anchor
+    const doc = editor.document
+    return doc[doc.length - 1]
+  }, [editor])
+
+  /** 녹음을 시작하면 제목 블록부터 남긴다 — 나중에 문서에서 찾기 위한 표지다 */
+  const startMeetingLog = useCallback((startedAt: Date) => {
+    const when = startedAt.toLocaleString('ko-KR', {
+      dateStyle: 'long',
+      timeStyle: 'short',
+    })
+    const id = crypto.randomUUID()
+    meetingAnchor.current = null // 항상 문서 끝에서 새로 시작한다
+    editor.insertBlocks(
+      [{ id, type: 'heading', props: { level: 2 }, content: `🎙️ 회의 기록 — ${when}` }],
+      meetingTarget(),
+      'after',
+    )
+    meetingAnchor.current = id
+  }, [editor, meetingTarget])
+
+  /**
+   * 받아쓴 한 구간을 문단으로 붙인다.
+   *
+   * 앞에 경과 시각을 회색으로 달아 둔다. 회의록을 나중에 읽을 때
+   * "이 얘기가 언제 나왔나"가 녹음 파일을 다시 듣는 유일한 단서다.
+   * offsetMs 가 음수면 (파일 통째로 받아쓴 경우) 시각을 붙이지 않는다.
+   */
+  const appendTranscript = useCallback((text: string, offsetMs: number) => {
+    const id = crypto.randomUUID()
+    editor.insertBlocks(
+      [{
+        id,
+        type: 'paragraph',
+        content: offsetMs >= 0
+          ? [
+              { type: 'text', text: `${formatOffset(offsetMs)}  `, styles: { textColor: 'gray' } },
+              { type: 'text', text, styles: {} },
+            ]
+          : text,
+      }],
+      meetingTarget(),
+      'after',
+    )
+    meetingAnchor.current = id
+  }, [editor, meetingTarget])
+
+  const endMeetingLog = useCallback(() => { meetingAnchor.current = null }, [])
+
+  /**
    * @ 를 눌렀을 때 뜨는 페이지 목록.
    *
    * SuggestionMenuController 는 키 입력마다 이걸 부른다.
@@ -463,6 +531,21 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
   return (
     <div className="relative">
       <ConnectionBadge status={status} />
+
+      {/*
+        회의 받아쓰기. 읽기 전용으로 열었으면 아예 그리지 않는다 —
+        서버도 edit 권한을 요구하므로(lib/core/transcribe.ts) 버튼만 보여 주면
+        눌러 봐야 403 이다.
+      */}
+      {canEdit && (
+        <MeetingRecorder
+          pageId={pageId}
+          onSessionStart={startMeetingLog}
+          onTranscript={appendTranscript}
+          onSessionEnd={endMeetingLog}
+        />
+      )}
+
       {!ready && <p className="px-1 py-2 text-sm text-neutral-400">불러오는 중...</p>}
       <div data-workspace-id={workspaceId}>
         <BlockNoteView editor={editor} editable={canEdit} slashMenu={false}>

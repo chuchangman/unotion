@@ -12,7 +12,8 @@
     "check:email": "node scripts/check-email.mjs",
     "check:db": "node scripts/check-db.mjs",
     "check:mcp": "node scripts/check-mcp.mjs",
-    "check:realtime": "node scripts/check-realtime.mjs"
+    "check:realtime": "node scripts/check-realtime.mjs",
+    "check:transcribe": "tsx scripts/check-transcribe.mjs"
   },
   "dependencies": {
     "@blocknote/core": "^0.54.0",
