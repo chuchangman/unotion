@@ -252,6 +252,13 @@ export function MeetingRecorder({
   const [elapsed, setElapsed] = useState(0)
   const [error, setError] = useState('')
   const [uploading, setUploading] = useState(false)
+  /**
+   * 소리가 작아 건너뛴 구간 수.
+   *
+   * 화면에 내보내는 게 요점이다. 예전에는 조용히 버려서, 마이크가 안 잡히는
+   * 회의가 끝날 때까지 아무도 몰랐다 — 사용자가 본 건 "하나도 안 됨" 뿐이었다.
+   */
+  const [skipped, setSkipped] = useState(0)
 
   /** 아직 글이 되지 못하고 보관 중인 구간들 */
   const [stored, setStored] = useState<PendingSegment[]>([])
@@ -434,16 +441,23 @@ export function MeetingRecorder({
   const handleSegment = useCallback(
     (blob: Blob, offsetMs: number, filename: string, peak: number) => {
       const s = session.current
+      if (blob.size === 0) return
 
       /**
        * 조용한 구간은 저장도 전송도 하지 않는다.
+       * Whisper 는 무음을 받으면 유튜브 자막 상투어를 지어내기 때문이다
+       * ("시청해주셔서 감사합니다" — lib/transcribe.ts 주석).
        *
-       * 비용보다 품질 때문이다 — Whisper 는 무음을 받으면 유튜브 자막 상투어를
-       * 지어낸다 ("시청해주셔서 감사합니다"). 자세한 건 lib/transcribe.ts 주석.
-       * 말소리가 없으니 버려도 잃는 게 없다.
+       * ★ 단, peak 이 **정확히 0** 이면 무음이 아니라 **측정이 안 된 것**이다.
+       *   진짜 조용한 방도 마이크 잡음 때문에 1e-5 수준은 나온다. 딱 0 은
+       *   AudioContext 가 suspended 이거나 analyser 가 안 붙었다는 뜻이다.
+       *   그 상태에서 구간을 버리면 회의 전체가 소리 없이 사라진다.
+       *   측정을 못 믿겠으면 **보낸다** — 잘못 보내는 비용은 요금 몇 원이지만
+       *   잘못 버리면 되돌릴 방법이 없다.
        */
-      if (peak < SILENCE_RMS || blob.size === 0) {
+      if (peak > 0 && peak < SILENCE_RMS) {
         s.silentMs += SEGMENT_MS
+        setSkipped((n) => n + 1)
         if (s.silentMs >= SILENCE_AUTOSTOP_MS) {
           setError(
             `${Math.round(SILENCE_AUTOSTOP_MS / 60000)}분 동안 말소리가 없어 녹음을 끝냈습니다`,
@@ -520,6 +534,7 @@ export function MeetingRecorder({
     s.silentMs = 0
     s.holding = false
     setHolding(false)
+    setSkipped(0)
     setUnprotected(!storeAvailable())
 
     /**
@@ -528,6 +543,17 @@ export function MeetingRecorder({
      */
     try {
       const ctx = new AudioContext()
+      /**
+       * ★ resume() 를 반드시 부른다.
+       *
+       * 이 AudioContext 는 getUserMedia 를 **await 한 뒤에** 만들어진다.
+       * 그 시점에는 브라우저가 보기에 사용자 제스처가 끝나 있어서,
+       * 크롬 자동재생 정책상 context 가 suspended 로 태어날 수 있다.
+       * suspended 면 getFloatTimeDomainData 가 **전부 0** 을 돌려주고,
+       * 그러면 모든 구간이 무음으로 판정돼 회의가 통째로 버려진다.
+       */
+      if (ctx.state === 'suspended') await ctx.resume()
+
       const analyser = ctx.createAnalyser()
       analyser.fftSize = 1024
       ctx.createMediaStreamSource(stream).connect(analyser)
@@ -548,10 +574,11 @@ export function MeetingRecorder({
     } catch {
       /**
        * AudioContext 를 못 만들어도 녹음은 계속한다.
-       * 다만 peak 이 0 으로 남으면 모든 구간이 무음으로 판정돼 하나도 안 보내진다.
-       * 문턱 위로 올려 두고, 거르는 건 서버에 맡긴다 (cleanTranscript).
+       * analyser 가 없으면 peak 이 0 으로 남는데, handleSegment 가 그걸
+       * "측정 실패" 로 보고 **전부 보낸다.** 무음 걸러내기는 서버의
+       * cleanTranscript 가 대신한다. 소리를 못 재는 것이 회의를 버릴 이유는 아니다.
        */
-      s.peak = 1
+      console.warn('[meeting] 음량 측정을 켜지 못했습니다 — 무음 구간도 그대로 보냅니다')
     }
 
     handlers.current.onSessionStart(new Date(s.sessionStartedAt))
@@ -801,6 +828,23 @@ export function MeetingRecorder({
           <span>
             받아쓰기는 멈췄지만 <strong>녹음은 계속 저장되고 있습니다.</strong>{' '}
             원인을 고친 뒤 아래 &ldquo;이어서 받아쓰기&rdquo; 를 누르면 그대로 받아쓸 수 있습니다.
+          </span>
+        </p>
+      )}
+
+      {/*
+        소리가 작아 건너뛴 구간이 있으면 **반드시 보여 준다.**
+        이걸 조용히 넘기면 마이크가 안 잡히는 회의를 끝까지 모른 채 진행한다.
+      */}
+      {skipped > 0 && phase !== 'idle' && (
+        <p
+          role="status"
+          className="flex items-start gap-1.5 rounded-md bg-amber-50 px-2.5 py-2 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-200"
+        >
+          <TriangleAlert className="mt-px size-3.5 shrink-0" />
+          <span>
+            소리가 너무 작아 <strong>{skipped}개 구간</strong>을 건너뛰었습니다.
+            위 막대가 초록색으로 움직이는지 보고, 안 움직이면 마이크 입력 장치를 확인하세요.
           </span>
         </p>
       )}
