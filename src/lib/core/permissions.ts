@@ -73,6 +73,22 @@ export async function assertWorkspaceMember(
   return role
 }
 
+/**
+ * owner / admin 만 통과.
+ * 프로젝트 룸 이름 바꾸기처럼 **룸 설정 자체**를 건드리는 동작에 쓴다.
+ * 문서 권한(page_permissions)과는 무관하다 — 그건 resolvePageAccess 쪽이다.
+ */
+export async function assertWorkspaceAdmin(
+  userId: string,
+  workspaceId: string,
+): Promise<WorkspaceRole> {
+  const role = await getWorkspaceRole(userId, workspaceId)
+  if (role !== 'owner' && role !== 'admin') {
+    throw new Forbidden('이 프로젝트 룸의 관리자만 할 수 있습니다')
+  }
+  return role
+}
+
 /** pages.path 에서 조상 id 를 깊은 순서로 뽑는다 (가까운 조상이 먼저) */
 export function ancestorIdsFromPath(path: string): string[] {
   return path.split('/').filter(Boolean).reverse()

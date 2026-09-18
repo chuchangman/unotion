@@ -2,10 +2,11 @@ import { and, asc, eq, isNull, sql } from 'drizzle-orm'
 import { generateKeyBetween } from 'fractional-indexing'
 import { db } from './db'
 import { pages, profiles, workspaceMembers, workspaces } from './schema'
-import { NotFound } from './errors'
-import { assertWorkspaceMember } from './permissions'
+import { InvalidInput, NotFound } from './errors'
+import { assertWorkspaceAdmin, assertWorkspaceMember } from './permissions'
 import * as audit from './audit'
 import type { Actor } from './actor'
+import type { WorkspaceRole } from './permissions'
 
 /** 로그인 직후 호출. auth.users 와 profiles 를 맞춘다. */
 export async function ensureProfile(input: {
@@ -25,17 +26,63 @@ export async function ensureProfile(input: {
   })
 }
 
-export async function getMyWorkspaces(userId: string) {
-  return db
-    .select({
-      id: workspaces.id,
-      name: workspaces.name,
-      role: workspaceMembers.role,
-    })
-    .from(workspaceMembers)
-    .innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId))
-    .where(eq(workspaceMembers.userId, userId))
-    .orderBy(asc(workspaces.createdAt))
+export type MyWorkspace = {
+  id: string
+  name: string
+  role: WorkspaceRole
+  memberCount: number
+}
+
+/**
+ * 내가 속한 프로젝트 룸 전부. 사이드바 드롭다운과 세션의 활성 룸 선택이 함께 쓴다.
+ *
+ * ★ 정렬 기준이 중요하다.
+ *   createdAt 오름차순으로만 하면, 예전 버그로 각자 만들어진 1인 룸이
+ *   나중에 초대로 참여한 팀 룸보다 앞서버린다. 멤버가 많은 쪽(= 실제 팀)을
+ *   먼저 놓고, 동수면 오래된 쪽을 먼저 놓는다. 그래서 **첫 항목이 곧 기본 룸**이다.
+ */
+export async function getMyWorkspaces(userId: string): Promise<MyWorkspace[]> {
+  const rows = await db.execute(sql`
+    SELECT w.id, w.name, m.role,
+           (SELECT count(*) FROM workspace_members m2 WHERE m2.workspace_id = w.id) AS member_count
+      FROM workspace_members m
+      JOIN workspaces w ON w.id = m.workspace_id
+     WHERE m.user_id = ${userId}
+     ORDER BY member_count DESC, w.created_at ASC
+  `)
+  return (rows as unknown as Array<Record<string, unknown>>).map((r) => ({
+    id: r.id as string,
+    name: r.name as string,
+    role: r.role as WorkspaceRole,
+    memberCount: Number(r.member_count),
+  }))
+}
+
+/**
+ * 프로젝트 룸 이름 변경. **admin 이상만** 할 수 있다.
+ * 빈 이름은 사이드바에서 아무것도 못 누르는 상태를 만들므로 막는다.
+ */
+export async function renameWorkspace(
+  actor: Actor,
+  workspaceId: string,
+  name: string,
+): Promise<{ id: string; name: string }> {
+  await assertWorkspaceAdmin(actor.userId, workspaceId)
+
+  const trimmed = name.trim()
+  if (!trimmed) throw new InvalidInput('룸 이름을 입력해 주세요')
+  if (trimmed.length > 60) throw new InvalidInput('룸 이름은 60자까지입니다')
+
+  const [row] = await db.update(workspaces)
+    .set({ name: trimmed })
+    .where(eq(workspaces.id, workspaceId))
+    .returning({ id: workspaces.id, name: workspaces.name })
+  if (!row) throw new NotFound('Workspace')
+
+  await audit.record(actor, 'workspace.rename', {
+    workspaceId, targetId: workspaceId, meta: { name: trimmed },
+  })
+  return row
 }
 
 /** 워크스페이스 + owner 멤버십 + 첫 페이지를 한 트랜잭션으로 만든다. */
@@ -69,27 +116,12 @@ export async function createWorkspace(actor: Actor, name: string) {
 }
 
 /**
- * 기본 워크스페이스를 **읽기만** 한다 (렌더 경로용).
- * 단일 쿼리 + limit 1 이라 왕복이 하나다.
+ * 기본 프로젝트 룸 (활성 룸이 지정되지 않았을 때 보여줄 것).
+ * 정렬 규칙은 getMyWorkspaces 한 곳에만 둔다 — 첫 항목이 기본이다.
  */
 export async function getPrimaryWorkspace(userId: string) {
-  /**
-   * ★ 정렬 기준이 중요하다.
-   * createdAt 오름차순으로 하면, 예전 버그로 각자 만들어진 1인 워크스페이스가
-   * 나중에 초대로 참여한 팀 워크스페이스보다 우선해버린다.
-   * 멤버가 많은 쪽(= 실제 팀)을 먼저 고르고, 동수면 오래된 쪽을 고른다.
-   */
-  const rows = await db.execute(sql`
-    SELECT w.id, w.name,
-           (SELECT count(*) FROM workspace_members m2 WHERE m2.workspace_id = w.id) AS member_count
-      FROM workspace_members m
-      JOIN workspaces w ON w.id = m.workspace_id
-     WHERE m.user_id = ${userId}
-     ORDER BY member_count DESC, w.created_at ASC
-     LIMIT 1
-  `)
-  const row = (rows as unknown as Array<Record<string, unknown>>)[0]
-  return row ? { id: row.id as string, name: row.name as string } : null
+  const [first] = await getMyWorkspaces(userId)
+  return first ? { id: first.id, name: first.name } : null
 }
 
 /**

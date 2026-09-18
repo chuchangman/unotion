@@ -8,16 +8,21 @@ import { createPage } from '@/app/actions/pages'
 import { OPEN_SEARCH_EVENT } from '@/components/search/SearchPalette'
 import { NotificationBell } from '@/components/notifications/NotificationBell'
 import { PageTree } from './PageTree'
+import { WorkspaceSwitcher } from './WorkspaceSwitcher'
 import type { TreeNode } from '@/lib/core/pages'
+import type { MyWorkspace } from '@/lib/core/workspaces'
+import type { WorkspaceRole } from '@/lib/core/permissions'
 
 type Props = {
-  workspace: { id: string; name: string }
+  workspace: { id: string; name: string; role: WorkspaceRole }
+  /** 내가 속한 룸 전부 — 상단 전환기 드롭다운용 */
+  workspaces: MyWorkspace[]
   nodes: TreeNode[]
   user: { name: string }
   unread: number
 }
 
-export function Sidebar({ workspace, nodes, user, unread }: Props) {
+export function Sidebar({ workspace, workspaces, nodes, user, unread }: Props) {
   const router = useRouter()
   const [pending, start] = useTransition()
 
@@ -30,10 +35,11 @@ export function Sidebar({ workspace, nodes, user, unread }: Props) {
 
   return (
     <aside className="flex h-dvh w-64 shrink-0 flex-col border-r border-neutral-200 bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-950">
-      <div className="px-3 py-3">
-        <p className="truncate text-sm font-semibold">{workspace.name}</p>
-        <p className="truncate text-xs text-neutral-500">{user.name}</p>
-      </div>
+      <WorkspaceSwitcher
+        workspace={workspace}
+        workspaces={workspaces}
+        userName={user.name}
+      />
 
       {/*
         단축키만 있으면 아무도 모른다. 버튼을 두되 단축키를 함께 보여줘서
