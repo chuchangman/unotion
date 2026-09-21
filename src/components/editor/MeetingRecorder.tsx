@@ -28,7 +28,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Mic, Square, Pause, Play, Loader2, Upload, TriangleAlert, ShieldAlert, Download, Trash2,
+  Sparkles,
 } from 'lucide-react'
+import { summarizePage } from '@/app/actions/meetings'
+import type { MeetingSummary } from '@/lib/transcribe'
 import {
   SEGMENT_MS,
   AUDIO_BITS_PER_SECOND,
@@ -61,6 +64,14 @@ export type MeetingRecorderProps = {
   /** 구간 하나가 글이 됐다. offsetMs 는 회의 시작부터의 경과 시간 (-1 이면 없음) */
   onTranscript: (text: string, offsetMs: number) => void
   onSessionEnd: () => void
+  /**
+   * 요약에 넣을 문서 전문. 에디터가 들고 있는 걸 그대로 준다 —
+   * 서버의 plain_text 는 2초 디바운스로 저장되는 파생본이라
+   * 녹음이 끝나자마자 요약하면 마지막 몇 문장이 빠진다.
+   */
+  getTranscript: () => string
+  /** 요약 결과를 문서에 넣는다. 전문은 건드리지 않는다 */
+  onSummary: (summary: MeetingSummary) => void
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -245,6 +256,8 @@ export function MeetingRecorder({
   onSessionStart,
   onTranscript,
   onSessionEnd,
+  getTranscript,
+  onSummary,
 }: MeetingRecorderProps) {
   const [phase, setPhase] = useState<Phase>('idle')
   const [pending, setPending] = useState(0)
@@ -259,6 +272,7 @@ export function MeetingRecorder({
    * 회의가 끝날 때까지 아무도 몰랐다 — 사용자가 본 건 "하나도 안 됨" 뿐이었다.
    */
   const [skipped, setSkipped] = useState(0)
+  const [summarizing, setSummarizing] = useState(false)
 
   /** 아직 글이 되지 못하고 보관 중인 구간들 */
   const [stored, setStored] = useState<PendingSegment[]>([])
@@ -707,7 +721,33 @@ export function MeetingRecorder({
     [pageId],
   )
 
-  const busy = phase === 'finishing' || uploading || recovering
+  /**
+   * 회의 전문을 요약한다.
+   *
+   * 요약은 전문을 **대체하지 않는다** — 문서 맨 위에 덧붙일 뿐이고 원문은 그대로
+   * 남는다. 요약 모델은 합의된 적 없는 항목을 "결정사항" 으로 적는 버릇이 있어서,
+   * 틀렸을 때 사람이 원문과 대조할 수 있어야 한다 (lib/core/summarize.ts 주석).
+   */
+  const summarize = useCallback(async () => {
+    setError('')
+    const transcript = getTranscript().trim()
+    if (transcript.length < 50) {
+      setError('요약할 내용이 너무 짧습니다 — 회의 기록을 먼저 만드세요')
+      return
+    }
+
+    setSummarizing(true)
+    const res = await summarizePage(pageId, transcript)
+    setSummarizing(false)
+
+    if (!res.ok) {
+      setError(res.message)
+      return
+    }
+    onSummary(res.data)
+  }, [pageId, getTranscript, onSummary])
+
+  const busy = phase === 'finishing' || uploading || recovering || summarizing
   const storedMinutes = Math.max(1, Math.round((stored.length * SEGMENT_MS) / 60000))
 
   return (
@@ -745,6 +785,21 @@ export function MeetingRecorder({
                 }}
               />
             </label>
+
+            {/* 요약 — 녹음이 없어도 손으로 적은 회의록에 쓸 수 있다 */}
+            <button
+              type="button"
+              onClick={() => void summarize()}
+              disabled={busy}
+              className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 disabled:opacity-50 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+            >
+              {summarizing ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="size-3.5" />
+              )}
+              {summarizing ? '요약하는 중' : '회의 요약'}
+            </button>
           </>
         ) : (
           <>

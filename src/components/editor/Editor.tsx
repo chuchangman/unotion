@@ -23,6 +23,7 @@ import { SupabaseYjsProvider, type ProviderStatus } from '@/lib/realtime/supabas
 import { blocksToPlainText, blocksToPageLinks } from '@/lib/blocks'
 import { resolveUpload } from '@/lib/upload'
 import { formatOffset } from '@/lib/transcribe'
+import type { MeetingSummary } from '@/lib/transcribe'
 import { MeetingRecorder } from './MeetingRecorder'
 import { bytesToBase64, base64ToBytes } from '@/lib/base64'
 import { loadYdoc, savePage, searchPagesForLink, createLinkedChildPage, snapshotVersion } from '@/app/actions/pages'
@@ -396,6 +397,54 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
   const endMeetingLog = useCallback(() => { meetingAnchor.current = null }, [])
 
   /**
+   * 요약에 넣을 전문.
+   *
+   * 서버의 pages.plain_text 가 아니라 **에디터가 들고 있는 것**을 쓴다.
+   * plain_text 는 2초 디바운스로 저장되는 파생본이라, 녹음이 끝나자마자
+   * 요약을 누르면 마지막 몇 문장이 빠진 채로 요약된다.
+   */
+  const getTranscript = useCallback(() => blocksToPlainText(editor.document), [editor])
+
+  /**
+   * 요약을 문서 **맨 위**에 붙인다.
+   *
+   * ★ 전문을 지우지 않는다. 요약 모델은 합의된 적 없는 항목을 "결정사항" 으로
+   *   적는 버릇이 있어서, 틀렸을 때 사람이 바로 아래 원문과 대조할 수 있어야 한다.
+   *   그래서 대체가 아니라 덧붙이기다 (lib/core/summarize.ts 주석).
+   */
+  const insertSummary = useCallback((summary: MeetingSummary) => {
+    type Blocks = Parameters<typeof editor.insertBlocks>[0]
+    const blocks: Blocks = [
+      { type: 'heading', props: { level: 2 }, content: '📋 회의 요약' },
+      {
+        type: 'paragraph',
+        content: [{
+          type: 'text',
+          // AI 가 쓴 것임을 문서에 남긴다 — 나중에 읽는 사람이 알아야 한다
+          text: summary.truncated
+            ? 'AI가 회의 전문을 요약했습니다. 전문이 길어 가운데 일부는 빼고 읽었으니 아래 원문을 확인하세요.'
+            : 'AI가 회의 전문을 요약했습니다. 원문은 아래에 그대로 있습니다.',
+          styles: { textColor: 'gray', italic: true },
+        }],
+      },
+    ]
+
+    const section = (title: string, items: string[]) => {
+      // 빈 절은 아예 만들지 않는다. 제목만 남은 절은 "없음" 보다 헷갈린다
+      if (items.length === 0) return
+      blocks.push({ type: 'heading', props: { level: 3 }, content: title })
+      for (const item of items) blocks.push({ type: 'bulletListItem', content: item })
+    }
+
+    section('핵심', summary.overview)
+    section('결정된 것', summary.decisions)
+    section('할 일', summary.actions)
+    section('확인 필요', summary.open)
+
+    editor.insertBlocks(blocks, editor.document[0], 'before')
+  }, [editor])
+
+  /**
    * @ 를 눌렀을 때 뜨는 페이지 목록.
    *
    * SuggestionMenuController 는 키 입력마다 이걸 부른다.
@@ -543,6 +592,8 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
           onSessionStart={startMeetingLog}
           onTranscript={appendTranscript}
           onSessionEnd={endMeetingLog}
+          getTranscript={getTranscript}
+          onSummary={insertSummary}
         />
       )}
 

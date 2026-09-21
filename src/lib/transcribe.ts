@@ -140,6 +140,27 @@ export function cleanTranscript(raw: string): string {
   return text
 }
 
+/**
+ * 회의 요약 결과.
+ *
+ * ★ 서버(lib/core/summarize.ts)가 아니라 여기 둔다.
+ *   그 파일은 `import 'server-only'` 라서, 클라이언트가 타입만 가져가려 해도
+ *   번들러가 서버 모듈을 끌고 들어갈 수 있다. 타입은 양쪽이 같이 쓰므로
+ *   MAX_AUDIO_BYTES 와 같은 이유로 공용 파일이 맞다.
+ */
+export type MeetingSummary = {
+  /** 핵심 흐름 3~5줄 */
+  overview: string[]
+  /** 확정된 것만 */
+  decisions: string[]
+  /** 하기로 한 일 */
+  actions: string[]
+  /** 결론이 안 난 것 */
+  open: string[]
+  /** 입력이 길어 가운데를 잘랐는지 — 화면에 알려야 한다 */
+  truncated: boolean
+}
+
 /** `01:23:45` / 1시간 미만이면 `23:45` */
 export function formatOffset(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000))

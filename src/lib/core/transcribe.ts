@@ -4,16 +4,13 @@
  * lib/core 의 규칙을 그대로 지킨다: 첫 인자는 Actor 고, 첫 줄은 권한 검사다.
  * 그래야 웹 UI 든 MCP 든 같은 게이트를 지난다 (db.ts 의 보안 모델 주석 참고).
  *
- * 외부 API 를 부르는 유일한 core 모듈이라 실패 경로가 유난히 많다.
- * 여기서 다 흡수해서 호출부에는 **사용자에게 그대로 보여줄 수 있는 한국어 메시지**만
- * 올려보낸다 — 회의 중에 터지면 원인을 읽을 시간이 없다.
+ * 유출 차단과 하루 상한은 ai.ts 의 공용 관문을 쓴다 — 요약(summarize)도 같은
+ * 관문을 지난다. 보안 게이트를 두 벌로 두면 한쪽만 고치고 만다.
  */
 import 'server-only'
-import { and, count, eq, gte } from 'drizzle-orm'
-import { db } from './db'
-import { auditLog } from './schema'
 import { assertCanEdit } from './permissions'
-import { InvalidInput, DomainError } from './errors'
+import { InvalidInput } from './errors'
+import { aiEndpoint, assertUnderDailyLimit, limitFromEnv, AiUnavailable } from './ai'
 import * as Audit from './audit'
 import type { Actor } from './actor'
 import { MAX_AUDIO_BYTES, cleanTranscript } from '../transcribe'
@@ -31,7 +28,6 @@ const REQUEST_TIMEOUT_MS = 60_000
  *   - 자체 호스팅   faster-whisper / whisper.cpp  무료 + 회의 내용이 밖으로 안 나감
  */
 const DEFAULT_MODEL = 'whisper-1'
-const DEFAULT_BASE_URL = 'https://api.openai.com/v1'
 
 /**
  * 워크스페이스 하루 호출 상한 (기본값).
@@ -41,10 +37,6 @@ const DEFAULT_BASE_URL = 'https://api.openai.com/v1'
  * 잊었거나 루프가 돈 것이다 — 둘 다 막는 게 맞다.
  */
 const DEFAULT_DAILY_CALL_LIMIT = 2000
-
-export class TranscriptionUnavailable extends DomainError {
-  constructor(message: string) { super(message, 'transcription_unavailable') }
-}
 
 export type TranscribeInput = {
   /** 전사 결과가 들어갈 페이지. 권한의 근거다 */
@@ -66,112 +58,6 @@ export type TranscribeInput = {
 }
 
 /**
- * 사설/로컬 주소인가. 여기 해당하면 회의 내용이 조직 밖으로 나가지 않는다.
- * 사내 whisper 서버를 이 판정으로 통과시킨다.
- */
-function isInternalHost(host: string): boolean {
-  if (host === 'localhost' || host === '::1') return true
-  if (host.endsWith('.local') || host.endsWith('.internal')) return true
-  if (/^127\./.test(host)) return true
-  if (/^10\./.test(host)) return true
-  if (/^192\.168\./.test(host)) return true
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true
-  return false
-}
-
-function config() {
-  const rawBase = process.env.TRANSCRIBE_BASE_URL
-  const apiKey = process.env.OPENAI_API_KEY
-
-  /**
-   * 아무것도 설정하지 않은 상태.
-   * 아래 유출 경고보다 이 메시지가 **먼저** 나와야 한다 — 설정한 적이 없는데
-   * "외부로 전송되는 설정입니다" 를 보면 뭘 고쳐야 할지 알 수 없다.
-   */
-  if (!apiKey && !rawBase) {
-    throw new TranscriptionUnavailable(
-      '받아쓰기가 아직 설정되지 않았습니다 (.env 의 "회의 받아쓰기" 절 참고). ' +
-      '녹음은 계속 보관되니 설정한 뒤 이어서 받아쓸 수 있습니다.',
-    )
-  }
-
-  const baseUrl = (rawBase || DEFAULT_BASE_URL).replace(/\/$/, '')
-
-  let host: string
-  try {
-    host = new URL(baseUrl).hostname
-  } catch {
-    throw new TranscriptionUnavailable('TRANSCRIBE_BASE_URL 이 올바른 주소가 아닙니다')
-  }
-
-  const internal = isInternalHost(host)
-
-  /**
-   * ★ 회의 내용이 조직 밖으로 나가는 것은 **기본으로 막는다.**
-   *
-   *   키만 넣으면 그 순간부터 전 직원의 회의 오디오가 제3자 서버로 흘러간다.
-   *   그건 누군가 한 번은 의식적으로 결정해야 하는 일이지, 환경변수 하나의
-   *   부수효과여서는 안 된다. 한 번 나간 내용은 되돌릴 수 없다.
-   *
-   *   사내/로컬 주소면 이 검사를 지난다 — 자체 호스팅은 애초에 안 나간다.
-   */
-  if (!internal && process.env.TRANSCRIBE_ALLOW_EXTERNAL !== 'true') {
-    throw new TranscriptionUnavailable(
-      `회의 오디오가 외부(${host})로 전송되는 설정입니다. ` +
-      '허용하려면 서버에 TRANSCRIBE_ALLOW_EXTERNAL=true 를 넣으세요. ' +
-      '내보내지 않으려면 TRANSCRIBE_BASE_URL 을 사내 whisper 서버로 지정하세요.',
-    )
-  }
-
-  // 자체 호스팅 서버는 키를 안 받는 경우가 많다. 내부 주소면 키 없이도 보낸다
-  if (!apiKey && !internal) {
-    throw new TranscriptionUnavailable(
-      '받아쓰기 API 키가 없습니다 — 서버에 OPENAI_API_KEY 를 넣어야 합니다',
-    )
-  }
-
-  return {
-    apiKey,
-    baseUrl,
-    host,
-    model: process.env.TRANSCRIBE_MODEL || DEFAULT_MODEL,
-    external: !internal,
-  }
-}
-
-/**
- * 하루 상한.
- *
- * 이미 남기고 있는 audit_log 를 그대로 센다 — 새 테이블도 마이그레이션도 없다.
- * `audit_log_ws_idx` 가 (workspace_id, created_at) 인덱스라 조회도 싸다.
- */
-async function assertUnderDailyLimit(workspaceId: string): Promise<void> {
-  const raw = process.env.TRANSCRIBE_DAILY_CALL_LIMIT
-  const limit = raw === undefined ? DEFAULT_DAILY_CALL_LIMIT : Number(raw)
-  // 0 이나 음수는 "상한 없음" 으로 읽는다 (사내 서버에서는 셀 이유가 없다)
-  if (!Number.isFinite(limit) || limit <= 0) return
-
-  const since = new Date()
-  since.setHours(0, 0, 0, 0)
-
-  const [row] = await db
-    .select({ used: count() })
-    .from(auditLog)
-    .where(and(
-      eq(auditLog.workspaceId, workspaceId),
-      eq(auditLog.action, 'page.transcribe'),
-      gte(auditLog.createdAt, since),
-    ))
-
-  if ((row?.used ?? 0) >= limit) {
-    throw new TranscriptionUnavailable(
-      `오늘 받아쓰기 한도(${limit}회)를 다 썼습니다. ` +
-      '녹음은 계속 저장되니 내일 이어서 받아쓸 수 있습니다.',
-    )
-  }
-}
-
-/**
  * 구간 하나를 글로 바꾼다.
  *
  * 돌려주는 문자열은 빈 값일 수 있다 — 무음이거나 모델이 지어낸 자막 상투어를
@@ -188,10 +74,19 @@ export async function transcribe(actor: Actor, input: TranscribeInput): Promise<
     )
   }
 
-  const { apiKey, baseUrl, host, model, external } = config()
+  const { apiKey, baseUrl, host, external } = aiEndpoint('TRANSCRIBE_BASE_URL', '받아쓰기')
 
   // 외부로 나가는 설정일 때만 센다. 사내 서버는 호출당 비용이 없다
-  if (external) await assertUnderDailyLimit(access.workspaceId)
+  if (external) {
+    await assertUnderDailyLimit(
+      access.workspaceId,
+      'page.transcribe',
+      limitFromEnv('TRANSCRIBE_DAILY_CALL_LIMIT', DEFAULT_DAILY_CALL_LIMIT),
+      '녹음은 계속 저장되니 내일 이어서 받아쓸 수 있습니다.',
+    )
+  }
+
+  const model = process.env.TRANSCRIBE_MODEL || DEFAULT_MODEL
 
   const form = new FormData()
   /**
@@ -222,7 +117,7 @@ export async function transcribe(actor: Actor, input: TranscribeInput): Promise<
     })
   } catch (err) {
     const timedOut = err instanceof Error && err.name === 'TimeoutError'
-    throw new TranscriptionUnavailable(
+    throw new AiUnavailable(
       timedOut
         ? '받아쓰기 서버가 응답하지 않습니다 — 잠시 뒤 다시 시도하세요'
         : `받아쓰기 서버(${host})에 연결하지 못했습니다`,
@@ -233,14 +128,14 @@ export async function transcribe(actor: Actor, input: TranscribeInput): Promise<
     const body = await res.text().catch(() => '')
     // ★ 본문을 그대로 사용자에게 보여주면 안 된다. 키 일부나 조직 id 가 섞여 온다.
     console.error('[transcribe] API 오류', res.status, body.slice(0, 500))
-    throw new TranscriptionUnavailable(describeFailure(res.status))
+    throw new AiUnavailable(describeFailure(res.status))
   }
 
   const data = (await res.json()) as { text?: string }
   const text = cleanTranscript(data.text ?? '')
 
   /**
-   * 감사 로그에 남긴다. 이 기능은 **호출당 돈이 나가는** 유일한 경로이자
+   * 감사 로그에 남긴다. 이 기능은 **호출당 돈이 나가는** 경로이자
    * 하루 상한의 근거이기도 하다 (assertUnderDailyLimit 이 이 행을 센다).
    * 본문은 남기지 않는다 — 회의 내용이 로그 테이블에 복제되면 안 된다.
    */

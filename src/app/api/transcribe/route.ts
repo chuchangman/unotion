@@ -91,7 +91,12 @@ function statusFor(code: string): number {
     case 'forbidden': return 403
     case 'not_found': return 404
     case 'invalid_input': return 400
-    case 'transcription_unavailable': return 503
+    /**
+     * ★ 503 이어야 한다. 클라이언트가 이 코드를 보고 "되풀이해도 소용없음" 으로
+     *   판단해 전송을 멈추고 녹음만 이어간다 (MeetingRecorder 의 fatal).
+     *   500 으로 새면 구간마다 같은 오류를 두드리며 회의 내내 재시도한다.
+     */
+    case 'ai_unavailable': return 503
     default: return 500
   }
 }
