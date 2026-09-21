@@ -35,7 +35,44 @@ const DEFAULT_DAILY_CALL_LIMIT = 100
 const MAX_INPUT_CHARS = 60_000
 const HEAD_CHARS = 15_000
 
-const DEFAULT_MODEL = 'llama-3.3-70b-versatile'
+/**
+ * 기본 모델.
+ *
+ * ★ 여기 적은 이름은 **언제든 죽는다.**
+ *   처음엔 llama-3.3-70b-versatile 을 박아 뒀는데, Groq 이 2026-06-17 에
+ *   지원 중단을 공지하고 2026-08-16 에 내렸다. 그 뒤로는 404 만 돌아왔다.
+ *   제공자들은 모델을 수시로 내린다 — 이 상수는 "지금 맞는 값" 이 아니라
+ *   "마지막으로 확인한 값" 이다.
+ *
+ *   그래서 모델이 없을 때 **실제로 쓸 수 있는 목록을 뽑아 알려 준다**
+ *   (아래 listChatModels). 이름을 외워 두는 것보다 그게 오래 간다.
+ */
+const DEFAULT_MODEL = 'openai/gpt-oss-120b'
+
+/**
+ * 이 엔드포인트가 지금 주는 모델 목록. **오류 경로에서만** 부른다.
+ *
+ * 실패해도 조용히 빈 배열을 준다 — 이건 사용자를 돕는 부가 정보지,
+ * 이것 때문에 정작 오류 메시지가 사라지면 안 된다.
+ */
+async function listChatModels(baseUrl: string, apiKey?: string): Promise<string[]> {
+  try {
+    const res = await fetch(`${baseUrl}/models`, {
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!res.ok) return []
+    const body = (await res.json()) as { data?: Array<{ id?: string }> }
+    return (body.data ?? [])
+      .map((m) => m.id)
+      .filter((id): id is string => typeof id === 'string')
+      // 전사·음성합성 모델은 요약에 못 쓴다
+      .filter((id) => !/whisper|tts|embed|guard|safety/i.test(id))
+      .sort()
+  } catch {
+    return []
+  }
+}
 
 const REQUEST_TIMEOUT_MS = 90_000
 
@@ -144,8 +181,27 @@ export async function summarizeMeeting(
     console.error('[summarize] API 오류', res.status, body.slice(0, 500))
 
     if (res.status === 404) {
+      /**
+       * ★ 404 의 원인이 두 가지다. 처음엔 이걸 구분하지 않아서
+       *   "Groq 에 chat 기능이 없습니다" 라는 **완전히 틀린 안내**를 띄웠다.
+       *   실제로는 모델 이름이 죽은 것이었다.
+       *
+       *     a) 그 모델이 없다        → 모델 이름 문제. 쓸 수 있는 목록을 보여 준다
+       *     b) 그 경로가 없다        → 받아쓰기 전용 서버를 보고 있는 것
+       */
+      if (/model/i.test(body)) {
+        const available = await listChatModels(baseUrl, apiKey)
+        const hint = available.length
+          ? ` 지금 쓸 수 있는 모델: ${available.slice(0, 8).join(', ')}`
+          : ''
+        throw new AiUnavailable(
+          `요약 모델 "${model}" 을 ${host} 에서 찾을 수 없습니다 ` +
+          '(제공자가 모델을 내렸을 수 있습니다). ' +
+          `SUMMARY_MODEL 을 바꾸세요.${hint}`,
+        )
+      }
       throw new AiUnavailable(
-        `${host} 에 요약(chat) 기능이 없습니다. ` +
+        `${host} 에 요약(chat) 경로가 없습니다. ` +
         '받아쓰기 전용 서버를 보고 있을 수 있습니다 — SUMMARY_BASE_URL 을 따로 지정하세요.',
       )
     }
