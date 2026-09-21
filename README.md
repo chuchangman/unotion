@@ -112,6 +112,36 @@ NVIDIA GPU 가 있으면 알아서 쓰고, 없거나 CUDA 가 안 잡히면 **CP
 npm run check:transcribe   # 환각 필터가 살아 있는지 (DB·네트워크 불필요)
 ```
 
+### 2-2. 화자 분리 — 아직 붙이지 않았다 (측정 중)
+
+Whisper 는 화자를 구분하지 못한다. 별도 모델이 필요하고 전사 API 에는 그 옵션이 없다.
+후보를 재 보는 중이고 **아직 앱에는 붙어 있지 않다.**
+
+```bash
+npm run check:diarization -- 회의녹음.webm --speakers 5
+```
+
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 기반이라 **GPU 가 필요 없다** — 실측 RTF 0.056
+(1시간 회의 ≈ 3.3분, CPU만). webm/m4a/mp3 아무거나 넣어도 PyAV 가 디코딩한다.
+
+> 붙이기 전에 재는 이유: 화자 분리는 "되냐" 가 아니라 **얼마나 틀리냐** 의 문제다.
+> pyannote 계열 공개 수치가 AMI SDM(한 방, 마이크 하나 멀리)에서 **DER 약 20%** 다 —
+> 발화 시간의 1/5이 엉뚱한 사람에게 붙는다. 그 수치도 영어 회의 기준이라
+> 한국어 5명 회의에서 어떻게 나올지는 실제 녹음으로 재 봐야 안다.
+
+후보 정리 (2026-09 조사):
+
+| | 라이선스 | GPU | DER | 비고 |
+|---|---|---|---|---|
+| **sherpa-onnx** (pyannote-seg + campplus) | Apache-2.0 | 불필요 | — | 지금 재는 중. Node·브라우저(WASM)도 된다 |
+| DiariZen | 코드 MIT / **가중치 CC BY-NC** | 필요 | 13.3% | 오픈 최고. 비상업 한정이라 토이 프로젝트만 |
+| pyannote community-1 | MIT / CC-BY-4.0 | 권장 | 19.9% (AMI SDM) | 무난 |
+| NeMo Sortformer | 오픈 | 필요 | — | **최대 4명** — 5인 팀이면 부족 |
+| pyannoteAI · CLOVA Speech | 상용 | — | 11.2% | 유료. 회의 내용이 밖으로 나간다 |
+
+`nemo_en_titanet_large` 는 sherpa-onnx 가 로드하지 못했다(지원 목록 밖).
+`reverb-diarization-v1` 은 4인 샘플을 5명으로 쪼갰다.
+
 ### 3. 마이그레이션 적용
 
 `npm run db:migrate` 로 한 번에 적용하거나, Supabase 대시보드 → **SQL Editor** 에 순서대로 붙여넣는다:
