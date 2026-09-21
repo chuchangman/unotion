@@ -18,8 +18,10 @@
  */
 
 const DB_NAME = 'notion-meeting-audio'
-const DB_VERSION = 1
+/** 2: recordings(회의 통짜 녹음) 저장소 추가 */
+const DB_VERSION = 2
 const STORE = 'segments'
+const RECORDINGS = 'recordings'
 const PAGE_INDEX = 'by_page'
 
 export type PendingSegment = {
@@ -56,8 +58,13 @@ function open(): Promise<IDBDatabase> {
     const req = indexedDB.open(DB_NAME, DB_VERSION)
     req.onupgradeneeded = () => {
       const db = req.result
+      // contains() 로 감싸 두면 어느 버전에서 올라오든 같은 코드가 동작한다
       if (!db.objectStoreNames.contains(STORE)) {
         const store = db.createObjectStore(STORE, { keyPath: 'id' })
+        store.createIndex(PAGE_INDEX, 'pageId', { unique: false })
+      }
+      if (!db.objectStoreNames.contains(RECORDINGS)) {
+        const store = db.createObjectStore(RECORDINGS, { keyPath: 'id' })
         store.createIndex(PAGE_INDEX, 'pageId', { unique: false })
       }
     }
@@ -69,6 +76,7 @@ function open(): Promise<IDBDatabase> {
 
 /** 트랜잭션 하나를 돌리고 닫는다. 실패는 전부 여기서 흡수한다 */
 async function withStore<T>(
+  store: string,
   mode: IDBTransactionMode,
   fn: (store: IDBObjectStore) => IDBRequest,
 ): Promise<T | null> {
@@ -86,8 +94,8 @@ async function withStore<T>(
 
   try {
     return await new Promise<T | null>((resolve, reject) => {
-      const tx = db.transaction(STORE, mode)
-      const req = fn(tx.objectStore(STORE))
+      const tx = db.transaction(store, mode)
+      const req = fn(tx.objectStore(store))
       req.onsuccess = () => resolve(req.result as T)
       req.onerror = () => reject(req.error ?? new Error('IndexedDB 요청 실패'))
       tx.onabort = () => reject(tx.error ?? new Error('IndexedDB 트랜잭션 중단'))
@@ -110,13 +118,13 @@ async function withStore<T>(
  * 실패하면 false — 호출부는 계속 녹음하되 사용자에게 알린다.
  */
 export async function putSegment(seg: PendingSegment): Promise<boolean> {
-  const res = await withStore<IDBValidKey>('readwrite', (s) => s.put(seg))
+  const res = await withStore<IDBValidKey>(STORE, 'readwrite', (s) => s.put(seg))
   return res !== null
 }
 
 /** 글이 문서에 들어간 뒤에만 부른다 */
 export async function deleteSegment(id: string): Promise<void> {
-  await withStore<undefined>('readwrite', (s) => s.delete(id))
+  await withStore<undefined>(STORE, 'readwrite', (s) => s.delete(id))
 }
 
 export async function deleteSegments(ids: string[]): Promise<void> {
@@ -125,7 +133,7 @@ export async function deleteSegments(ids: string[]): Promise<void> {
 
 /** 녹음된 순서대로 돌려준다 — 문서에 적히는 순서가 곧 이 순서다 */
 export async function listSegments(pageId: string): Promise<PendingSegment[]> {
-  const rows = await withStore<PendingSegment[]>('readonly', (s) =>
+  const rows = await withStore<PendingSegment[]>(STORE, 'readonly', (s) =>
     s.index(PAGE_INDEX).getAll(pageId),
   )
   if (!rows) return []
@@ -135,6 +143,67 @@ export async function listSegments(pageId: string): Promise<PendingSegment[]> {
 /** 재시도 횟수만 올린다. 계속 실패하는 구간을 화면에서 구분하기 위한 것 */
 export async function markAttempt(seg: PendingSegment): Promise<void> {
   await putSegment({ ...seg, attempts: seg.attempts + 1 })
+}
+
+// ─────────────────────────────────────────── 통짜 녹음
+
+/**
+ * 회의 하나를 처음부터 끝까지 담은 녹음.
+ *
+ * ★ 20초 구간들과 별개로 보관하는 이유
+ *   구간들은 각각 완결된 webm 이라 **이어 붙일 수 없다**(붙이면 깨진다).
+ *   그런데 화자 분리는 전체를 들어야 누가 누군지 가른다 — 20초씩 따로 보면
+ *   구간마다 화자 번호가 따로 놀아서 이어지지 않는다.
+ *   그래서 같은 마이크 스트림에 녹음기를 하나 더 붙여 통짜로 받아 둔다.
+ *
+ *   전사와 달리 이건 **자동으로 지우지 않는다.** 사용자가 내려받거나
+ *   버릴 때까지 남는다. 24kbps 기준 1시간에 약 11MB 다.
+ */
+export type MeetingRecording = {
+  id: string
+  pageId: string
+  /** 회의가 시작된 시각 (epoch ms) */
+  startedAt: number
+  durationMs: number
+  bytes: number
+  blob: Blob
+  mime: string
+}
+
+export async function putRecording(rec: MeetingRecording): Promise<boolean> {
+  const res = await withStore<IDBValidKey>(RECORDINGS, 'readwrite', (s) => s.put(rec))
+  return res !== null
+}
+
+/** 최근 것이 위로 */
+export async function listRecordings(pageId: string): Promise<MeetingRecording[]> {
+  const rows = await withStore<MeetingRecording[]>(RECORDINGS, 'readonly', (s) =>
+    s.index(PAGE_INDEX).getAll(pageId),
+  )
+  if (!rows) return []
+  return rows.sort((a, b) => b.startedAt - a.startedAt)
+}
+
+export async function deleteRecording(id: string): Promise<void> {
+  await withStore<undefined>(RECORDINGS, 'readwrite', (s) => s.delete(id))
+}
+
+/** 통짜 녹음은 파일 하나라 그냥 내려받으면 된다 */
+export function downloadRecording(rec: MeetingRecording): void {
+  const stamp = new Date(rec.startedAt)
+    .toLocaleString('ko-KR', { dateStyle: 'short', timeStyle: 'short' })
+    .replace(/[^0-9]/g, '')
+  const ext = rec.mime.includes('mp4') ? 'mp4' : rec.mime.includes('ogg') ? 'ogg' : 'webm'
+
+  const url = URL.createObjectURL(rec.blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `회의_${stamp}.${ext}`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  // 즉시 해제하면 일부 브라우저에서 저장이 취소된다
+  setTimeout(() => URL.revokeObjectURL(url), 10_000)
 }
 
 /**

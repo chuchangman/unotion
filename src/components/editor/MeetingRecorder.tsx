@@ -46,6 +46,11 @@ import {
 } from '@/lib/transcribe'
 import {
   type PendingSegment,
+  type MeetingRecording,
+  putRecording,
+  listRecordings,
+  deleteRecording,
+  downloadRecording,
   putSegment,
   deleteSegment,
   deleteSegments,
@@ -178,6 +183,15 @@ type Session = {
   silentMs: number
   /** 전송 보류 중인가. 큐가 읽어서 저장만 하고 넘어간다 */
   holding: boolean
+  /**
+   * 회의 전체를 담는 두 번째 녹음기.
+   *
+   * 20초 구간들은 각각 완결된 webm 이라 **이어 붙일 수 없다.** 그런데 화자 분리는
+   * 전체를 들어야 누가 누군지 가른다. 그래서 같은 스트림에 녹음기를 하나 더 붙여
+   * 통짜로 받아 둔다. 이쪽은 stop()/start() 로 끊지 않으므로 pause() 를 그대로 쓴다.
+   */
+  fullRecorder: MediaRecorder | null
+  fullParts: Blob[]
 }
 
 const emptySession = (): Session => ({
@@ -196,6 +210,8 @@ const emptySession = (): Session => ({
   active: false,
   queue: Promise.resolve(),
   tail: '',
+  fullRecorder: null,
+  fullParts: [],
   sessionId: '',
   sessionStartedAt: 0,
   silentMs: 0,
@@ -273,6 +289,8 @@ export function MeetingRecorder({
    */
   const [skipped, setSkipped] = useState(0)
   const [summarizing, setSummarizing] = useState(false)
+  /** 이 페이지에 보관된 통짜 녹음들 (내려받기/버리기용) */
+  const [recordings, setRecordings] = useState<MeetingRecording[]>([])
 
   /** 아직 글이 되지 못하고 보관 중인 구간들 */
   const [stored, setStored] = useState<PendingSegment[]>([])
@@ -298,11 +316,18 @@ export function MeetingRecorder({
     setStored(await listSegments(pageId))
   }, [pageId])
 
+  const refreshRecordings = useCallback(async () => {
+    setRecordings(await listRecordings(pageId))
+  }, [pageId])
+
   // ── 이 페이지에 받아쓰지 못한 구간이 남아 있는지 (지난 회의 / 지난 탭)
   useEffect(() => {
     let alive = true
     void listSegments(pageId).then((rows) => {
       if (alive) setStored(rows)
+    })
+    void listRecordings(pageId).then((rows) => {
+      if (alive) setRecordings(rows)
     })
     return () => { alive = false }
   }, [pageId])
@@ -316,6 +341,10 @@ export function MeetingRecorder({
     s.segmentTimer = null
     s.levelTimer = null
     s.recorder = null
+    if (s.fullRecorder && s.fullRecorder.state !== 'inactive') {
+      try { s.fullRecorder.stop() } catch { /* 이미 멈췄다 */ }
+    }
+    s.fullRecorder = null
     s.stream?.getTracks().forEach((t) => t.stop())
     s.stream = null
     void s.audioCtx?.close().catch(() => {})
@@ -412,6 +441,8 @@ export function MeetingRecorder({
 
   const stop = useCallback(() => {
     const s = session.current
+    // active 를 끄기 **전에** 재야 마지막 구간까지 길이에 들어간다
+    const durationMs = s.accumulated + (s.active ? performance.now() - s.resumedAt : 0)
     s.active = false
     if (s.segmentTimer) clearTimeout(s.segmentTimer)
     s.segmentTimer = null
@@ -438,8 +469,41 @@ export function MeetingRecorder({
       try { rec.stop() } catch { resolve() }
     })
 
-    void lastSegment
-      .then(() => s.queue)
+    /**
+     * 통짜 녹음도 같은 방식으로 stop 이벤트를 기다린다.
+     * 여기서 기다리지 않으면 마지막 5초 조각이 들어오기 전에 Blob 을 만들게 된다.
+     */
+    const fullDone = new Promise<void>((resolve) => {
+      const rec = s.fullRecorder
+      if (!rec || rec.state === 'inactive') return resolve()
+      rec.addEventListener('stop', () => resolve(), { once: true })
+      try { rec.stop() } catch { resolve() }
+    })
+
+    void Promise.all([lastSegment, fullDone])
+      .then(async () => {
+        /**
+         * 통짜 녹음을 보관한다. 구간들과 달리 **자동으로 지우지 않는다** —
+         * 사용자가 내려받거나 버릴 때까지 남는다. 화자 분리의 재료이기도 하다.
+         */
+        if (s.fullParts.length > 0) {
+          const mime = s.mime || 'audio/webm'
+          const blob = new Blob(s.fullParts, { type: mime })
+          s.fullParts = []
+          const saved = await putRecording({
+            id: s.sessionId || crypto.randomUUID(),
+            pageId,
+            startedAt: s.sessionStartedAt,
+            durationMs,
+            bytes: blob.size,
+            blob,
+            mime,
+          })
+          if (!saved) setUnprotected(true)
+          void refreshRecordings()
+        }
+        return s.queue
+      })
       .finally(() => {
         teardown()
         setPhase('idle')
@@ -447,7 +511,7 @@ export function MeetingRecorder({
         void refreshStored()
         handlers.current.onSessionEnd()
       })
-  }, [teardown, refreshStored])
+  }, [teardown, refreshStored, refreshRecordings, pageId])
 
   /**
    * 구간이 하나 만들어졌다. 버릴지 보낼지는 여기서 정한다.
@@ -595,6 +659,26 @@ export function MeetingRecorder({
       console.warn('[meeting] 음량 측정을 켜지 못했습니다 — 무음 구간도 그대로 보냅니다')
     }
 
+    /**
+     * 통짜 녹음기. 구간 녹음기와 **같은 스트림**에 붙는다.
+     * 5초마다 조각을 받아 두는 건 메모리에 한 번에 몰리지 않게 하려는 것이고,
+     * 이쪽은 중간에 stop() 하지 않으므로 조각들이 하나의 완결된 파일이 된다.
+     */
+    try {
+      const full = new MediaRecorder(stream, {
+        ...(s.mime ? { mimeType: s.mime } : {}),
+        audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
+      })
+      s.fullParts = []
+      full.ondataavailable = (e) => { if (e.data.size > 0) s.fullParts.push(e.data) }
+      full.start(5000)
+      s.fullRecorder = full
+    } catch {
+      // 통짜 녹음이 안 돼도 받아쓰기는 계속한다. 화자 분리용 부가 기능이다
+      console.warn('[meeting] 통짜 녹음을 시작하지 못했습니다')
+      s.fullRecorder = null
+    }
+
     handlers.current.onSessionStart(new Date(s.sessionStartedAt))
     setElapsed(0)
     setPhase('recording')
@@ -613,6 +697,8 @@ export function MeetingRecorder({
     s.segmentTimer = null
     s.accumulated += performance.now() - s.resumedAt
     if (s.recorder && s.recorder.state !== 'inactive') s.recorder.stop()
+    // 통짜 녹음기는 끊지 않고 멈춘다 — 재개하면 같은 파일로 이어진다
+    if (s.fullRecorder?.state === 'recording') s.fullRecorder.pause()
     setLevel(0)
     setPhase('paused')
   }, [])
@@ -622,6 +708,7 @@ export function MeetingRecorder({
     s.resumedAt = performance.now()
     s.active = true
     s.silentMs = 0
+    if (s.fullRecorder?.state === 'paused') s.fullRecorder.resume()
     setPhase('recording')
     startLoop()
   }, [startLoop])
@@ -914,6 +1001,53 @@ export function MeetingRecorder({
           이 브라우저에서는 오디오를 임시 보관할 수 없습니다 (시크릿 창이거나 저장 공간이 부족).
           받아쓰기가 실패하면 그 구간은 복구할 수 없습니다.
         </p>
+      )}
+
+      {/*
+        보관된 회의 녹음. 받아쓰기와 별개로 **오디오 원본**이 남는다.
+        화자 분리를 붙이기 전까지는 이걸 내려받아 측정 도구에 넣어 본다
+        (npm run check:diarization).
+      */}
+      {recordings.length > 0 && phase === 'idle' && (
+        <div className="rounded-md border border-neutral-200 px-3 py-2.5 dark:border-neutral-800">
+          <p className="text-xs text-neutral-500 dark:text-neutral-400">
+            보관된 회의 녹음 <strong>{recordings.length}개</strong>
+          </p>
+          <ul className="mt-1.5 space-y-1">
+            {recordings.map((rec) => (
+              <li key={rec.id} className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="text-neutral-600 dark:text-neutral-300">
+                  {new Date(rec.startedAt).toLocaleString('ko-KR', {
+                    dateStyle: 'short',
+                    timeStyle: 'short',
+                  })}
+                </span>
+                <span className="text-neutral-400">
+                  {formatOffset(rec.durationMs)} · {(rec.bytes / 1024 / 1024).toFixed(1)}MB
+                </span>
+                <button
+                  type="button"
+                  onClick={() => downloadRecording(rec)}
+                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-neutral-500 hover:bg-neutral-100 hover:text-neutral-800 dark:hover:bg-neutral-800 dark:hover:text-neutral-100"
+                >
+                  <Download className="size-3.5" />
+                  내려받기
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!confirm('이 녹음을 버릴까요? 오디오는 여기에만 있어서 되돌릴 수 없습니다.')) return
+                    void deleteRecording(rec.id).then(refreshRecordings)
+                  }}
+                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+                >
+                  <Trash2 className="size-3.5" />
+                  버리기
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
 
       {/* 보관 중인 구간 — 지난 회의에서 남았거나 방금 실패한 것들 */}
