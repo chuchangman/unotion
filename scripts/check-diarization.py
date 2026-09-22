@@ -125,6 +125,16 @@ def main() -> None:
         default=0.5,
         help="자동 판정일 때만 쓰인다. 낮출수록 사람을 더 잘게 쪼갠다",
     )
+    ap.add_argument(
+        "--emb",
+        default="",
+        help=(
+            "임베딩 모델 파일명 (sherpa-onnx 릴리스의 .onnx 이름). "
+            "비우면 기본값. 화자가 안 갈리면 이걸 바꿔 보는 게 제일 싸다 — "
+            "목소리를 구분하는 건 분할기가 아니라 이 모델이다. "
+            "예: wespeaker_en_voxceleb_resnet293_LM.onnx"
+        ),
+    )
     ap.add_argument("--threads", type=int, default=4)
     args = ap.parse_args()
 
@@ -134,7 +144,14 @@ def main() -> None:
 
     print("\n모델 준비")
     seg = fetch(*SEGMENTATION)
-    emb = fetch(*EMBEDDING)
+    emb = fetch(
+        *(
+            EMBEDDING
+            if not args.emb
+            else (args.emb, f"{RELEASE}/speaker-recongition-models/{args.emb}")
+        )
+    )
+    print(f"  임베딩: {emb.name}")
 
     print(f"\n읽는 중: {path.name}")
     audio = decode(path)
