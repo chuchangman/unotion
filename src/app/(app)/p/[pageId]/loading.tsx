@@ -11,10 +11,12 @@
  *     - 이 골격이 프리페치되어 클릭 즉시 그려진다
  *     - 본문은 스트리밍으로 흘러 들어오고, 사이드바는 그동안 계속 조작 가능하다
  *
- * 레이아웃 밀림을 막으려고 실제 문서 화면과 같은 래퍼(px-12 py-16 max-w-3xl)를 쓴다.
- * 데이터베이스 페이지는 max-w-6xl 이지만 어느 쪽인지 미리 알 수 없어 흔한 쪽에 맞춘다.
+ * 레이아웃 밀림을 막으려고 실제 문서 화면과 **같은 래퍼**를 쓴다.
+ * 값이 갈라지면 본문이 들어오는 순간 화면이 옆으로 튀므로 상수로 묶어 뒀다
+ * (lib/page-frame.ts).
  */
 import { ViewTransition } from 'react'
+import { PAGE_FRAME } from '@/lib/page-frame'
 
 export default function Loading() {
   return (
@@ -28,7 +30,7 @@ export default function Loading() {
      * **모든** 전환에 반응해 엉뚱한 때 깜빡인다.
      */
     <ViewTransition exit="doc-out" default="none">
-    <article className="mx-auto max-w-3xl px-12 py-16" aria-busy>
+    <article className={PAGE_FRAME} aria-busy>
       <span className="sr-only">문서를 불러오는 중</span>
 
       {/* 아이콘 + 제목 */}

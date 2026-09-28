@@ -8,6 +8,7 @@ import { listMembers } from '@/lib/core/workspaces'
 import { countOpenThreads } from '@/lib/core/comments'
 import { DomainError } from '@/lib/core/errors'
 import type { Actor } from '@/lib/core/actor'
+import { PAGE_FRAME } from '@/lib/page-frame'
 import { PageHeader } from '@/components/editor/PageHeader'
 import { EditorLoader } from '@/components/editor/EditorLoader'
 import { PeekPanel } from '@/components/editor/PeekPanel'
@@ -174,7 +175,11 @@ export default async function PageView({
      * 돌지 않는다. 즉 빠를 때는 그대로 즉시, 느릴 때만 부드럽게다.
      */
     <ViewTransition enter="doc-in" default="none">
-    <article className={`mx-auto px-12 py-16 ${isDatabase ? 'max-w-6xl' : 'max-w-3xl'}`}>
+    {/*
+      문서든 데이터베이스든 같은 틀을 쓴다. 예전에는 데이터베이스만 넓게
+      뒀는데, 다단이 생기면서 일반 문서도 가로를 쓰게 됐다.
+    */}
+    <article className={PAGE_FRAME}>
       {/*
         key: 다른 페이지로 이동해도 같은 위치의 같은 컴포넌트라 React 가 상태를
         그대로 재사용한다. 제목·아이콘·Yjs 문서는 페이지마다 새로 시작해야 하므로
