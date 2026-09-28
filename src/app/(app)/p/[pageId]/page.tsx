@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { Suspense } from 'react'
+import { Suspense, ViewTransition } from 'react'
 import { requireSessionContext } from '@/lib/auth'
 import { getPage, listBacklinks, resolvePageAccess } from '@/lib/core/pages'
 import * as Collections from '@/lib/core/collections'
@@ -93,6 +93,16 @@ export default async function PageView({
   )
 
   return (
+    /**
+     * 본문이 **들어오는** 애니메이션. 짝은 loading.tsx 의 `doc-out` 이다.
+     *
+     * 골격이 비켜난 뒤(150ms)에 시작해 천천히 올라온다 — 두 화면이 동시에
+     * 보이면 오히려 어지럽다. 타이밍은 globals.css 의 --vt-* 에 있다.
+     *
+     * 이미 캐시된 문서로 넘어갈 때는 골격이 아예 안 뜨므로 이 애니메이션도
+     * 돌지 않는다. 즉 빠를 때는 그대로 즉시, 느릴 때만 부드럽게다.
+     */
+    <ViewTransition enter="doc-in" default="none">
     <article className={`mx-auto px-12 py-16 ${isDatabase ? 'max-w-6xl' : 'max-w-3xl'}`}>
       {/*
         key: 다른 페이지로 이동해도 같은 위치의 같은 컴포넌트라 React 가 상태를
@@ -105,6 +115,8 @@ export default async function PageView({
         initialTitle={page.title}
         icon={page.icon}
         canEdit={canEdit}
+        // 본문 화면에서만 켠다. 우측 미리보기 패널은 탭 제목을 건드리면 안 된다
+        syncTabTitle
       />
 
       {toolbar}
@@ -168,5 +180,6 @@ export default async function PageView({
         />
       </Suspense>
     </article>
+    </ViewTransition>
   )
 }

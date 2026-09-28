@@ -105,3 +105,59 @@ body {
   text-align: left;
 }
 .public-body th { font-weight: 600; }
+
+/* ─────────────────────────────────────────────────────────────
+   문서 전환 (React <ViewTransition> + 브라우저 View Transitions API)
+
+   문서를 옮길 때 버벅여 보이던 지점은 **골격이 사라지고 본문이 튀어나오는 순간**
+   이었다. 둘 사이에 아무 연결이 없어서, 실제 대기 시간보다 더 끊겨 보인다.
+
+   빠져나가는 쪽은 빠르게(150ms), 들어오는 쪽은 천천히(210ms) 그리고 빠져나가기가
+   끝난 뒤에 시작한다. 비대칭이 일부러다 — 옛 화면은 시선을 뺏지 않고 비켜야 하고,
+   새 화면은 눈이 따라갈 시간을 줘야 한다.
+   ───────────────────────────────────────────────────────────── */
+:root {
+  --vt-exit: 150ms;
+  --vt-enter: 210ms;
+  --vt-move: 400ms;
+}
+
+::view-transition-old(.doc-out) {
+  animation:
+    var(--vt-exit) ease-out both vt-fade reverse,
+    var(--vt-exit) ease-out both vt-slide reverse;
+}
+::view-transition-new(.doc-in) {
+  animation:
+    var(--vt-enter) ease-in var(--vt-exit) both vt-fade,
+    var(--vt-move) ease-in both vt-slide;
+}
+
+/* 흐림은 픽셀 보간 티가 나는 걸 덮어 준다 */
+@keyframes vt-fade {
+  from { filter: blur(3px); opacity: 0; }
+  to   { filter: blur(0);   opacity: 1; }
+}
+@keyframes vt-slide {
+  from { transform: translateY(10px); }
+  to   { transform: translateY(0); }
+}
+
+/*
+  전환 중에 덮개가 클릭을 삼킨다. 사이드바를 연달아 누르는 게 이 앱의 주 동작이라
+  그 사이 클릭이 사라지면 오히려 더 느리게 느껴진다. 통과시킨다.
+*/
+::view-transition { pointer-events: none; }
+
+/*
+  움직임에 민감한 사용자를 위해 전부 끈다.
+  애니메이션이 없으면 브라우저 기본 동작(즉시 교체)으로 돌아갈 뿐 기능은 그대로다.
+*/
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(*),
+  ::view-transition-new(*),
+  ::view-transition-group(*) {
+    animation-duration: 0s !important;
+    animation-delay: 0s !important;
+  }
+}

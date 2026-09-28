@@ -14,8 +14,20 @@
  * 레이아웃 밀림을 막으려고 실제 문서 화면과 같은 래퍼(px-12 py-16 max-w-3xl)를 쓴다.
  * 데이터베이스 페이지는 max-w-6xl 이지만 어느 쪽인지 미리 알 수 없어 흔한 쪽에 맞춘다.
  */
+import { ViewTransition } from 'react'
+
 export default function Loading() {
   return (
+    /**
+     * 골격이 **비켜나는** 애니메이션.
+     *
+     * 짝은 page.tsx 의 `doc-in` 이다. 둘은 같은 Suspense 경계의 fallback 과
+     * children 이라, 골격이 물러나고 본문이 들어오는 하나의 동작으로 이어진다.
+     *
+     * default="none" 이 중요하다. 없으면 이 ViewTransition 이 페이지에서 일어나는
+     * **모든** 전환에 반응해 엉뚱한 때 깜빡인다.
+     */
+    <ViewTransition exit="doc-out" default="none">
     <article className="mx-auto max-w-3xl px-12 py-16" aria-busy>
       <span className="sr-only">문서를 불러오는 중</span>
 
@@ -33,5 +45,6 @@ export default function Loading() {
         <div className="h-4 w-1/2 animate-pulse rounded bg-neutral-100 dark:bg-neutral-800" />
       </div>
     </article>
+    </ViewTransition>
   )
 }
