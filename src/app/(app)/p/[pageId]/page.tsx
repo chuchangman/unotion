@@ -115,8 +115,6 @@ export default async function PageView({
         initialTitle={page.title}
         icon={page.icon}
         canEdit={canEdit}
-        // 본문 화면에서만 켠다. 우측 미리보기 패널은 탭 제목을 건드리면 안 된다
-        syncTabTitle
       />
 
       {toolbar}

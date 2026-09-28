@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { renamePage, setPageIcon } from '@/app/actions/pages'
 
@@ -11,42 +11,12 @@ type Props = {
   initialTitle: string
   icon: { type: 'emoji' | 'url'; value: string } | null
   canEdit: boolean
-  /**
-   * 이 제목을 브라우저 탭에 띄울지.
-   *
-   * ★ 기본은 꺼 둔다. 이 컴포넌트는 본문 화면과 **우측 미리보기 패널**에서
-   *   같이 쓰이는데, 미리보기를 열 때마다 탭 이름이 바뀌면 지금 보고 있는
-   *   문서가 무엇인지 알 수 없게 된다. 켜는 쪽은 본문 화면 하나뿐이다.
-   */
-  syncTabTitle?: boolean
 }
 
-export function PageHeader({
-  pageId,
-  initialTitle,
-  icon,
-  canEdit,
-  syncTabTitle = false,
-}: Props) {
+export function PageHeader({ pageId, initialTitle, icon, canEdit }: Props) {
   const [title, setTitle] = useState(initialTitle)
   const [current, setCurrent] = useState(icon)
   const [showPicker, setShowPicker] = useState(false)
-  /**
-   * 문서 제목을 브라우저 탭에 띄운다.
-   *
-   * 서버에서 generateMetadata 로 해도 되지만 그러면 문서를 그릴 때마다 제목을
-   * 읽는 DB 왕복이 하나 더 붙는다. 이 앱에서 제일 신경 쓴 게 그 왕복 수다
-   * (README 성능 메모). 게다가 제목을 고치는 **중에도** 탭이 따라와야 하는데
-   * 서버 메타데이터는 그걸 못 한다 — 이 상태값은 타이핑하는 즉시 바뀐다.
-   *
-   * 되돌리기(cleanup)는 하지 않는다. 다음 문서로 가면 그쪽 PageHeader 가
-   * 곧바로 덮어쓰고, 문서 밖 화면은 각자 자기 제목을 쓴다.
-   */
-  useEffect(() => {
-    if (!syncTabTitle) return
-    document.title = `${title.trim() || '제목 없음'} · 우노션`
-  }, [syncTabTitle, title])
-
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const router = useRouter()
   /** 저장한 제목이 사이드바에 아직 안 반영됐는지 */
