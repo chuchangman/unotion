@@ -1,6 +1,6 @@
 'use client'
 
-import { Suspense, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 
@@ -14,12 +14,55 @@ export default function LoginPage() {
   const [message, setMessage] = useState('')
   const [showEmail, setShowEmail] = useState(false)
 
+  /**
+   * 별칭 주소로 들어왔으면 **로그인을 시작하기 전에** 정본으로 옮긴다.
+   *
+   * 이렇게 해야 두 가지가 동시에 만족된다.
+   *   - PKCE 쿠키의 origin 과 콜백 origin 이 같다 (위 origin() 주석)
+   *   - Supabase 의 Redirect URL 허용 목록에 정본 하나만 넣어 두면 된다
+   *
+   * replace 라 뒤로가기로 별칭 주소에 다시 빠지지 않는다. 이미 정본이면
+   * 아무 일도 안 하므로 순환하지 않는다.
+   */
+  useEffect(() => {
+    const canonical = process.env.NEXT_PUBLIC_SITE_URL
+    if (!canonical) return
+    let target: URL
+    try {
+      target = new URL(canonical)
+    } catch {
+      // 설정이 주소가 아니면 그냥 지금 주소로 진행한다 — 막지는 않는다
+      return
+    }
+    if (target.origin === window.location.origin) return
+    window.location.replace(
+      `${target.origin}${window.location.pathname}${window.location.search}`,
+    )
+  }, [])
+
   const nextPath = () =>
     new URLSearchParams(window.location.search).get('next') ?? '/'
 
-  // 프리뷰 배포에서 로그인하면 링크가 프리뷰 URL 을 가리키게 된다.
-  // NEXT_PUBLIC_SITE_URL 이 있으면 그걸 정본으로 쓴다.
-  const origin = () => process.env.NEXT_PUBLIC_SITE_URL || window.location.origin
+  /**
+   * ★ 로그인은 **시작한 주소에서 끝나야** 한다.
+   *
+   *   PKCE 의 code verifier 는 로그인을 시작한 origin 의 **쿠키**에 저장된다.
+   *   예전에는 redirectTo 만 NEXT_PUBLIC_SITE_URL 로 강제했는데, 그러면
+   *   별칭 주소로 들어온 사람은 쿠키를 A 에 두고 B 로 돌아오게 되어
+   *   코드 교환이 반드시 실패했다:
+   *
+   *     "PKCE code verifier not found in storage"
+   *
+   *   이 배포에는 별칭이 여럿이다 (unotion.vercel.app, unotion-git-main-…,
+   *   배포별 고유 URL, 프리뷰 URL). 초대 링크를 어느 주소로 받았느냐에 따라
+   *   첫 로그인이 통째로 실패했다. 실패하면 그 응답의 origin(= 정본)으로
+   *   /login 에 떨어지므로 **두 번째 시도는 성공한다** — 초대받은 팀원이 겪은
+   *   증상이 정확히 이것이었다.
+   *
+   *   그래서 아래 useEffect 로 주소를 먼저 정본으로 옮기고, redirectTo 는
+   *   지금 열린 주소를 그대로 쓴다. 시작과 끝이 같으면 쿠키는 항상 실린다.
+   */
+  const origin = () => window.location.origin
 
   async function signInWithGoogle() {
     setState('sending')
@@ -119,10 +162,30 @@ export default function LoginPage() {
   )
 }
 
-/** ?error= 로 실려 온 콜백 실패 메시지 */
+/**
+ * ?error= 로 실려 온 콜백 실패 메시지.
+ *
+ * Supabase 원문은 영어이고 개발자용이다. 실제로 초대받은 팀원이
+ * "PKCE code verifier not found in storage. … use @supabase/ssr on both the
+ * server and client" 를 그대로 봤다 — 읽어도 뭘 해야 할지 알 수 없다.
+ * 사용자가 **할 수 있는 행동**으로 바꿔 준다.
+ */
 function CallbackError() {
   const error = useSearchParams().get('error')
   if (!error) return null
+
+  // 이 경우는 대개 다시 누르면 된다 (origin 이 정본으로 맞춰진 뒤이므로)
+  if (/pkce|code verifier|code_verifier/i.test(error)) {
+    return (
+      <ErrorBanner>
+        로그인이 중간에 끊겼습니다. 아래 버튼으로 <strong>한 번 더</strong> 시도해 주세요.
+        <span className="mt-1 block text-xs opacity-70">
+          다른 브라우저나 앱 안의 브라우저에서 로그인을 시작하면 생길 수 있습니다.
+        </span>
+      </ErrorBanner>
+    )
+  }
+
   return <ErrorBanner>{error}</ErrorBanner>
 }
 

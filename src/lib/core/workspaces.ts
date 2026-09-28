@@ -136,24 +136,40 @@ export async function isFirstRun(): Promise<boolean> {
 /**
  * 로그인 시 워크스페이스 확보.
  *
- * ⚠️ 예전에는 "내 워크스페이스가 없으면 새로 만든다" 였다.
- * 그 결과 팀원이 Google 로 그냥 로그인할 때마다 각자 1인 워크스페이스가
- * 생겨서 아무도 같은 위키를 못 봤다.
+ * **항상 하나를 보장한다.** 초대 없이 들어와도 대기 화면에 갇히지 않는다.
  *
- * 이제는 **아무도 워크스페이스를 안 가진 최초 1회에만** 만든다.
- * 그 뒤에 들어오는 사람은 초대를 통해서만 합류한다.
+ * ⚠️ 이 동작은 한 번 껐다가 다시 켠 것이라 배경을 알아야 한다.
+ *
+ *   처음엔 "내 워크스페이스가 없으면 만든다" 였다. 그 결과 팀원이 Google 로
+ *   그냥 로그인할 때마다 각자 1인 룸이 생겨서 **아무도 같은 위키를 못 봤다.**
+ *   그래서 최초 1회만 만들고 나머지는 초대로만 합류하게 바꿨었다.
+ *
+ *   지금 다시 켜는 이유는, 그 사고를 막는 장치가 **세 겹으로** 생겼기 때문이다.
+ *     1) 초대 자동 수락이 **먼저** 돈다 (lib/auth.ts 의 bootstrapAfterLogin).
+ *        초대받은 사람은 여기 오기 전에 이미 팀 룸의 멤버라 개인 룸이 안 생긴다.
+ *     2) getMyWorkspaces 가 member_count DESC 로 정렬한다. 개인 룸과 팀 룸을
+ *        둘 다 가져도 **팀 룸이 기본**이 된다 (이 파일 위쪽 정렬 주석 참고).
+ *     3) 사이드바에 룸 전환 드롭다운이 있다. 잘못 들어가도 한 번에 옮긴다.
  */
-export async function ensureWorkspaceOnLogin(actor: Actor) {
+export async function ensureWorkspaceOnLogin(actor: Actor, displayName?: string) {
   const mine = await getMyWorkspaces(actor.userId)
   if (mine.length > 0) return { id: mine[0].id, name: mine[0].name }
 
+  // 아무도 아직 워크스페이스를 안 가진 진짜 첫 실행이면 팀 이름으로 연다
   if (await isFirstRun()) {
     const { workspace } = await createWorkspace(actor, '우리 팀')
     return { id: workspace.id, name: workspace.name }
   }
 
-  // 초대받지 못한 사용자 — 대기 화면을 보여준다
-  return null
+  /**
+   * 초대 없이 들어온 사람. 개인 룸을 하나 열어 주고 바로 쓰게 한다.
+   *
+   * 이름에 사용자 이름을 넣는 것도 안전장치다 — "홍길동의 프로젝트" 는 팀 룸과
+   * 눈으로 구별되므로, 혹시 개인 룸에 들어가 있어도 바로 알아챈다.
+   */
+  const who = displayName?.trim()
+  const { workspace } = await createWorkspace(actor, who ? `${who}의 프로젝트` : '내 프로젝트')
+  return { id: workspace.id, name: workspace.name }
 }
 
 /** @멘션 / 담당자 지정 / MCP list_members 용 */

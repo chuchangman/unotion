@@ -134,7 +134,13 @@ export async function bootstrapAfterLogin() {
   const email = user.email ?? ''
   if (email) await autoAcceptInvite(actor, email)
 
-  // null 이면 초대받지 못한 사용자다 (워크스페이스를 함부로 만들지 않는다)
-  const workspace = await ensureWorkspaceOnLogin(actor)
+  /**
+   * 초대가 없으면 개인 룸을 하나 열어 준다 — 혼자서도 바로 쓸 수 있게.
+   *
+   * ★ 순서가 중요하다. 위의 autoAcceptInvite 가 **먼저** 돌아야 한다.
+   *   초대받은 사람이 여기서 개인 룸부터 받으면 팀 위키 대신 빈 방에 들어가
+   *   앉는다. 예전에 실제로 그 사고가 났다 (workspaces.ts 의 ⚠️ 주석).
+   */
+  const workspace = await ensureWorkspaceOnLogin(actor, nameOf(user))
   return { actor, workspace }
 }

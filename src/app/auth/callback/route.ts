@@ -28,8 +28,12 @@ export async function GET(request: NextRequest) {
     // next 가 기본값이면 "/" 를 거치지 않고 첫 페이지로 바로 보낸다.
     // "/" 는 사이드바 레이아웃(트리 조회)까지 렌더한 뒤 리다이렉트하므로
     // 로그인 직후 체감되는 왕복이 하나 더 붙는다.
+    /**
+     * 이제 ensureWorkspaceOnLogin 이 **항상** 룸을 하나 보장하므로 여기로
+     * 오는 일은 없다. 그래도 남겨 둔다 — 그 계약이 깨졌을 때 빈 화면 대신
+     * 무슨 일이 났는지 알려 주는 화면이 뜨는 쪽이 낫다.
+     */
     if (!session?.workspace) {
-      // 초대받지 못한 사용자 — 대기 화면으로
       destination = '/pending'
     } else if (next === '/') {
       const firstPage = await getFirstPageId(session.workspace.id)
