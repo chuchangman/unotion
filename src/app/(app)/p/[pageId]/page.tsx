@@ -18,6 +18,51 @@ import { CommentPanel } from '@/components/comments/CommentPanel'
 import { SharePanel } from '@/components/sharing/SharePanel'
 
 /**
+ * 문서는 있는데 내가 못 보는 경우.
+ *
+ * 404 를 띄우면 "문서가 지워졌나?" 로 읽혀서 엉뚱한 곳을 찾게 된다. 실제 원인은
+ * 대개 셋 중 하나이고, 각각 해야 할 행동이 다르다 — 그래서 셋 다 적어 준다.
+ *
+ * 지금 로그인한 계정을 같이 보여 주는 게 핵심이다. 구글 계정을 두 개 쓰는
+ * 사람이 흔하고, 그 경우 이 화면만 보고 바로 알아챈다.
+ */
+function NoAccess({ workspaceName, account }: { workspaceName: string; account: string }) {
+  return (
+    <div className="mx-auto max-w-lg px-12 py-24">
+      <h1 className="text-xl font-semibold tracking-tight">이 문서에 접근할 권한이 없습니다</h1>
+      <p className="mt-3 text-sm text-neutral-500">
+        문서는 존재하지만 지금 계정으로는 열 수 없습니다.
+      </p>
+
+      <ul className="mt-5 space-y-1.5 text-sm text-neutral-600 dark:text-neutral-400">
+        <li>· 다른 프로젝트 룸의 문서일 수 있습니다</li>
+        <li>· 아직 공유받지 못했을 수 있습니다 — 링크를 보낸 사람에게 요청하세요</li>
+        <li>· 다른 계정으로 로그인했을 수 있습니다</li>
+      </ul>
+
+      <div className="mt-6 rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-xs text-neutral-600 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-400">
+        지금 <strong>{account}</strong> 으로 <strong>{workspaceName}</strong> 에 접속해 있습니다.
+      </div>
+
+      <div className="mt-6 flex gap-3 text-sm">
+        <Link
+          href="/"
+          className="rounded-lg bg-neutral-900 px-3 py-2 text-white hover:bg-neutral-700 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300"
+        >
+          내 문서로 가기
+        </Link>
+        <Link
+          href="/settings/members"
+          className="rounded-lg border border-neutral-200 px-3 py-2 hover:bg-neutral-100 dark:border-neutral-800 dark:hover:bg-neutral-800"
+        >
+          팀 멤버 보기
+        </Link>
+      </div>
+    </div>
+  )
+}
+
+/**
  * 데이터 로딩은 여기서 끝낸다.
  * JSX 를 try/catch 안에서 만들면 안 된다 — React 는 JSX 를 만든 자리에서
  * 렌더하지 않으므로 그 catch 는 렌더 오류를 잡지 못한다 (react-hooks/error-boundaries).
@@ -55,9 +100,24 @@ async function loadPageView(actor: Actor, workspaceId: string, pageId: string) {
         ])
       : [null, []]
 
-    return { page, canEdit, canComment, canManage, found, table, members, openComments, backlinks }
+    return {
+      kind: 'ok' as const,
+      page, canEdit, canComment, canManage, found, table, members, openComments, backlinks,
+    }
   } catch (err) {
-    if (err instanceof DomainError) return null
+    /**
+     * ★ "없는 문서" 와 "권한 없는 문서" 를 구분한다.
+     *
+     *   예전에는 둘 다 null 로 뭉개서 404 를 띄웠다. 그래서 링크를 받은 사람은
+     *   문서가 지워진 건지, 계정이 잘못된 건지, 다른 룸 문서인지 알 수 없었다.
+     *   원인이 다르면 해야 할 행동도 다르다 — 화면이 그걸 말해 줘야 한다.
+     *
+     *   resolvePageAccess 는 문서 행이 없으면 NotFound 를, 있는데 접근이 안 되면
+     *   (assertLevel 을 거쳐) Forbidden 을 던진다. 코드로 갈라 쓰면 된다.
+     */
+    if (err instanceof DomainError) {
+      return { kind: err.code === 'forbidden' ? ('forbidden' as const) : ('not_found' as const) }
+    }
     throw err
   }
 }
@@ -71,7 +131,18 @@ export default async function PageView({
   const { actor, workspace, displayName } = await requireSessionContext()
 
   const data = await loadPageView(actor, workspace.id, pageId)
-  if (!data) notFound()
+
+  if (data.kind === 'forbidden') {
+    return <NoAccess workspaceName={workspace.name} account={displayName} />
+  }
+
+  /**
+   * 진짜로 없는 문서(지워졌거나 잘못된 주소)는 그대로 404 가 맞다.
+   *
+   * `notFound()` 만 쓰면 타입이 안 좁혀져서 아래 구조 분해가 전부
+   * "undefined 일 수 있음" 이 된다. return 을 붙여 흐름이 여기서 끝남을 알린다.
+   */
+  if (data.kind !== 'ok') return notFound()
 
   const { page, canEdit, canComment, canManage, found, table, members, openComments, backlinks } = data
   const isDatabase = Boolean(found && table)
