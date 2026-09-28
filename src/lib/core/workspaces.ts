@@ -1,8 +1,8 @@
-import { and, asc, eq, isNull, sql } from 'drizzle-orm'
+import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm'
 import { generateKeyBetween } from 'fractional-indexing'
 import { db } from './db'
-import { pages, profiles, workspaceMembers, workspaces } from './schema'
-import { InvalidInput, NotFound } from './errors'
+import { pagePermissions, pages, profiles, workspaceMembers, workspaces } from './schema'
+import { Forbidden, InvalidInput, NotFound } from './errors'
 import { assertWorkspaceAdmin, assertWorkspaceMember } from './permissions'
 import * as audit from './audit'
 import type { Actor } from './actor'
@@ -170,6 +170,80 @@ export async function ensureWorkspaceOnLogin(actor: Actor, displayName?: string)
   const who = displayName?.trim()
   const { workspace } = await createWorkspace(actor, who ? `${who}의 프로젝트` : '내 프로젝트')
   return { id: workspace.id, name: workspace.name }
+}
+
+/** 높을수록 강하다. 누가 누구를 내보낼 수 있는지 비교하는 데만 쓴다 */
+const ROLE_RANK: Record<WorkspaceRole, number> = {
+  guest: 0,
+  member: 1,
+  admin: 2,
+  owner: 3,
+}
+
+/**
+ * 멤버를 룸에서 내보낸다. **owner/admin 이 자기보다 낮은 권한만** 내보낼 수 있다.
+ *
+ * ★ 멤버십만 지우면 안 된다.
+ *   page_permissions 는 워크스페이스 멤버십과 **별개로** 접근을 준다 —
+ *   resolvePageAccess 는 명시적 권한이 있으면 멤버가 아니어도 통과시킨다.
+ *   그래서 멤버십만 끊으면 "내보냈는데 공유받은 문서는 계속 보이는" 구멍이 남는다.
+ *   둘을 한 트랜잭션에서 같이 지운다.
+ *
+ * ★ 같은 등급끼리는 못 내보낸다 (admin 이 admin 을, owner 가 owner 를).
+ *   서로 내보내는 경쟁이 벌어지면 마지막에 누른 사람만 남는다.
+ *   owner 는 최고 등급이라 아무도 못 내보낸다 — 룸이 주인을 잃지 않는다.
+ *
+ * 문서는 지우지 않는다. 작성자 표시(created_by)도 그대로 둔다 —
+ * 사람이 나갔다고 그가 쓴 회의록이 사라지면 안 된다.
+ */
+export async function removeMember(
+  actor: Actor,
+  workspaceId: string,
+  targetUserId: string,
+): Promise<void> {
+  const myRole = await assertWorkspaceAdmin(actor.userId, workspaceId)
+
+  if (targetUserId === actor.userId) {
+    throw new InvalidInput('자기 자신은 내보낼 수 없습니다')
+  }
+
+  const [target] = await db
+    .select({ role: workspaceMembers.role })
+    .from(workspaceMembers)
+    .where(and(
+      eq(workspaceMembers.workspaceId, workspaceId),
+      eq(workspaceMembers.userId, targetUserId),
+    ))
+    .limit(1)
+
+  if (!target) throw new NotFound('멤버')
+
+  const targetRole = target.role as WorkspaceRole
+  if (ROLE_RANK[targetRole] >= ROLE_RANK[myRole]) {
+    throw new Forbidden(`나와 같거나 더 높은 권한(${targetRole})은 내보낼 수 없습니다`)
+  }
+
+  await db.transaction(async (tx) => {
+    // 이 룸 문서들에 걸린 그 사람의 개별 권한부터 거둔다
+    await tx.delete(pagePermissions).where(and(
+      eq(pagePermissions.userId, targetUserId),
+      inArray(
+        pagePermissions.pageId,
+        tx.select({ id: pages.id }).from(pages).where(eq(pages.workspaceId, workspaceId)),
+      ),
+    ))
+
+    await tx.delete(workspaceMembers).where(and(
+      eq(workspaceMembers.workspaceId, workspaceId),
+      eq(workspaceMembers.userId, targetUserId),
+    ))
+  })
+
+  await audit.record(actor, 'workspace.member_remove', {
+    workspaceId,
+    targetId: targetUserId,
+    meta: { role: targetRole },
+  })
 }
 
 /** @멘션 / 담당자 지정 / MCP list_members 용 */

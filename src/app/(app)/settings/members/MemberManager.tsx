@@ -3,18 +3,53 @@
 import { useState, useTransition } from 'react'
 import { Copy, Trash2 } from 'lucide-react'
 import { inviteMember, revokeInvite } from '@/app/actions/invites'
+import { removeProjectMember } from '@/app/actions/workspaces'
 
 type Member = { id: string; email: string; displayName: string; role: string }
 type Invite = { id: string; email: string; role: string; expiresAt: Date }
 
+/**
+ * 서버(core 의 removeMember)와 **같은 순서**여야 한다.
+ * 여기 값은 누를 수 없는 버튼을 안 그리기 위한 것이고, 실제 차단은 서버가 한다.
+ */
+const ROLE_RANK: Record<string, number> = { guest: 0, member: 1, admin: 2, owner: 3 }
+
 export function MemberManager({
-  members, invites, canInvite,
-}: { members: Member[]; invites: Invite[]; canInvite: boolean }) {
+  members, invites, canInvite, workspaceId, myUserId, myRole,
+}: {
+  members: Member[]
+  invites: Invite[]
+  canInvite: boolean
+  workspaceId: string
+  myUserId: string
+  myRole: string | null
+}) {
   const [email, setEmail] = useState('')
   const [role, setRole] = useState<'admin' | 'member' | 'guest'>('member')
   const [notice, setNotice] = useState<{ url: string; emailed: boolean } | null>(null)
   const [error, setError] = useState('')
   const [pending, start] = useTransition()
+
+  /**
+   * 내보낼 수 있는 사람인가.
+   * 나 자신은 안 되고, 나와 같거나 높은 권한도 안 된다 — owner 는 아무도 못 내보낸다.
+   */
+  const canRemove = (m: Member) =>
+    m.id !== myUserId && (ROLE_RANK[myRole ?? ''] ?? -1) > (ROLE_RANK[m.role] ?? 99)
+
+  const remove = (m: Member) => {
+    const ok = confirm(
+      `${m.displayName || m.email} 님을 내보낼까요?\n\n` +
+      '이 룸의 문서에 개별로 공유했던 권한도 같이 회수됩니다.\n' +
+      '작성한 문서는 그대로 남습니다.',
+    )
+    if (!ok) return
+    start(async () => {
+      setError('')
+      const res = await removeProjectMember(workspaceId, m.id)
+      if (!res.ok) setError(res.message)
+    })
+  }
 
   const invite = () =>
     start(async () => {
@@ -68,7 +103,20 @@ export function MemberManager({
                 <p className="font-medium">{m.displayName}</p>
                 <p className="text-xs text-neutral-500">{m.email}</p>
               </div>
-              <span className="text-xs text-neutral-500">{m.role}</span>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-neutral-500">{m.role}</span>
+                {canRemove(m) && (
+                  <button
+                    type="button"
+                    onClick={() => remove(m)}
+                    disabled={pending}
+                    aria-label={`${m.displayName || m.email} 내보내기`}
+                    className="rounded p-1 text-neutral-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50 dark:hover:bg-red-950 dark:hover:text-red-400"
+                  >
+                    <Trash2 className="size-4" />
+                  </button>
+                )}
+              </div>
             </li>
           ))}
         </ul>

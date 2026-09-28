@@ -108,3 +108,24 @@ export async function renameProjectRoom(
     return { name: row.name }
   })
 }
+
+/**
+ * 멤버 내보내기. admin 이상이 **자기보다 낮은 권한만** 내보낼 수 있다
+ * (판정은 core 의 removeMember 가 한다).
+ */
+export async function removeProjectMember(
+  workspaceId: string,
+  userId: string,
+): Promise<ActionResult<null>> {
+  return run(async () => {
+    const actor = await requireActor()
+    await Workspaces.removeMember(actor, workspaceId, userId)
+
+    /**
+     * 멤버 목록은 설정 화면에 있고, 사이드바의 룸 목록도 멤버 수로 정렬된다.
+     * 레이아웃까지 무효화해야 둘 다 맞는다.
+     */
+    revalidatePath('/', 'layout')
+    return null
+  })
+}
