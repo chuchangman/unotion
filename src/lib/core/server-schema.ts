@@ -11,6 +11,7 @@
  * 렌더링은 필요 없고 파싱과 직렬화만 되면 된다.
  */
 import { BlockNoteSchema, createBlockSpec, defaultBlockSpecs } from '@blocknote/core'
+import { withMultiColumn } from '@blocknote/xl-multi-column'
 import { PAGE_BOARD_TYPE, pageBoardPropSchema, parseColumns } from '../page-board'
 
 const serverPageBoard = createBlockSpec(
@@ -53,7 +54,17 @@ const serverPageBoard = createBlockSpec(
   },
 )
 
-/** 클라이언트(Editor.tsx)의 스키마와 블록 구성이 같아야 한다 */
-export const serverSchema = BlockNoteSchema.create({
-  blockSpecs: { ...defaultBlockSpecs, [PAGE_BOARD_TYPE]: serverPageBoard() },
-})
+/**
+ * 클라이언트(Editor.tsx)의 스키마와 블록 구성이 같아야 한다.
+ *
+ * ★ withMultiColumn 을 **양쪽 다** 감싼다.
+ *   다단(columnList/column)은 사용자가 본문에 넣는 순간 ydoc 안의 노드가 된다.
+ *   서버가 이 타입을 모른 채 파싱하면 MCP get_page 가 그 안의 내용을 통째로
+ *   잃고, update_page 가 저장하는 순간 사용자의 단 구성이 사라진다.
+ *   파일 맨 위 주석이 pageBoard 를 두고 경고한 것과 같은 함정이다.
+ */
+export const serverSchema = withMultiColumn(
+  BlockNoteSchema.create({
+    blockSpecs: { ...defaultBlockSpecs, [PAGE_BOARD_TYPE]: serverPageBoard() },
+  }),
+)

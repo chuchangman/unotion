@@ -13,6 +13,9 @@ const nextConfig: NextConfig = {
   serverExternalPackages: [
     '@blocknote/server-util',
     '@blocknote/core',
+    // 다단 블록. core 와 **같이** 빠져야 한다 — 하나만 번들되면 BlockNote
+    // 인스턴스가 둘이 되어 스키마 대조가 깨진다 (아래 yjs 와 같은 이유)
+    '@blocknote/xl-multi-column',
     'jsdom',
     'yjs',
     'y-protocols',

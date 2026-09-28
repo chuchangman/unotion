@@ -12,6 +12,13 @@ import {
 import { BlockNoteView } from '@blocknote/mantine'
 import { withCollaboration } from '@blocknote/core/yjs'
 import { BlockNoteSchema, defaultBlockSpecs } from '@blocknote/core'
+import { en as coreEn } from '@blocknote/core/locales'
+import {
+  withMultiColumn,
+  multiColumnDropCursor,
+  getMultiColumnSlashMenuItems,
+  locales as multiColumnLocales,
+} from '@blocknote/xl-multi-column'
 import { PageBoardBlock } from './PageBoardBlock'
 import { PAGE_BOARD_TYPE, serializeColumns } from '@/lib/page-board'
 import { LayoutGrid } from 'lucide-react'
@@ -228,9 +235,27 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
        * props 를 알아야 한다. 안 그러면 MCP get_page 가 ydoc 을 파싱할 때
        * 이 블록을 잃는다. 공용 정의는 lib/page-board.ts 에 있다.
        */
-      schema: BlockNoteSchema.create({
-        blockSpecs: { ...defaultBlockSpecs, [PAGE_BOARD_TYPE]: PageBoardBlock() },
-      }),
+      /**
+       * 다단(좌우 배치)을 켠다. columnList/column 블록이 생긴다.
+       *
+       * ★ lib/core/server-schema.ts 도 **똑같이** 감싸야 한다.
+       *   서버가 이 타입을 모르면 MCP 가 문서를 파싱할 때 단 안의 내용을
+       *   통째로 잃는다 (page-board.ts 가 경고한 것과 같은 함정).
+       */
+      schema: withMultiColumn(
+        BlockNoteSchema.create({
+          blockSpecs: { ...defaultBlockSpecs, [PAGE_BOARD_TYPE]: PageBoardBlock() },
+        }),
+      ),
+      /** 블록을 옆으로 끌었을 때 "여기 단을 만든다" 를 보여 주는 커서 */
+      dropCursor: multiColumnDropCursor,
+      /**
+       * 다단 기능은 사전에 multi_column 키를 요구한다. 코어 기본 사전에는 없다.
+       * 코어는 기존처럼 영어로 두고 이 키만 채운다 — 에디터 UI 언어를
+       * 통째로 바꾸는 건 이번 작업의 범위가 아니다.
+       * (한국어로 쓰려면 coreEn -> ko, multiColumnLocales.en -> .ko 로 바꾸면 된다)
+       */
+      dictionary: { ...coreEn, multi_column: multiColumnLocales.en },
       /**
        * 이미지·파일 업로드. 이게 없으면 BlockNote 는 URL 붙여넣기만 받는다
        * (드래그앤드롭·붙여넣기·"파일 선택"이 전부 죽어 있었다).
@@ -622,7 +647,12 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
             triggerCharacter="/"
             getItems={async (query) =>
               filterSuggestionItems(
-                [...getDefaultReactSlashMenuItems(editor), ...pageMenuItems],
+                [
+                  ...getDefaultReactSlashMenuItems(editor),
+                  // "Two Columns" / "Three Columns" — 본문 아무 데서나 단을 만든다
+                  ...getMultiColumnSlashMenuItems(editor),
+                  ...pageMenuItems,
+                ],
                 query,
               )
             }
