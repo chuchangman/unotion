@@ -604,8 +604,18 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
         />
       )}
 
-      {!ready && <p className="px-1 py-2 text-sm text-neutral-400">불러오는 중...</p>}
-      <div data-workspace-id={workspaceId}>
+      {/*
+        불러오는 중 표시도 **흐름 밖**에 둔다.
+        예전에는 이 문단이 본문 위 자리를 차지했다가 사라지면서 화면을 한 번 더
+        튕기게 했다. 배지와 합쳐 문서를 열 때마다 네 번 움직인 셈이다.
+        어차피 이 시점의 에디터는 비어 있으므로 그 위에 겹쳐도 가릴 게 없다.
+      */}
+      <div data-workspace-id={workspaceId} className="relative">
+        {!ready && (
+          <p className="pointer-events-none absolute left-1 top-2 text-sm text-neutral-400">
+            불러오는 중...
+          </p>
+        )}
         <BlockNoteView editor={editor} editable={canEdit} slashMenu={false}>
           {/* 슬래시 메뉴 — 기본 항목 + 하위 페이지 */}
           <SuggestionMenuController
@@ -629,16 +639,28 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
   )
 }
 
+/**
+ * 연결이 **끊겼을 때만** 알린다.
+ *
+ * ★ "연결 중" 은 일부러 안 띄운다.
+ *   문서를 열 때마다 잠깐 떴다 사라지는데, 이 배지가 문서 흐름 안에 있어서
+ *   나타날 때 본문을 아래로 밀고 사라질 때 위로 튕겼다. 문서를 옮길 때마다
+ *   화면이 두 번 움직이니 실제보다 훨씬 버벅이는 것처럼 보였다.
+ *   연결은 대개 순식간이고, "되는 중" 이라는 정보는 사용자의 행동을 바꾸지 않는다.
+ *   알려야 할 건 **안 될 때** 뿐이다.
+ *
+ * ★ absolute 로 띄우는 이유도 같다.
+ *   오프라인 배지가 흐름 안에 있으면 끊기는 순간 본문이 통째로 밀린다.
+ *   편집 중이라면 커서 위치까지 눈에서 놓친다.
+ */
 function ConnectionBadge({ status }: { status: ProviderStatus }) {
-  if (status === 'connected') return null
-  const connecting = status === 'connecting'
+  if (status !== 'disconnected') return null
   return (
     <div
-      className={`mb-3 inline-flex rounded-md px-2 py-1 text-xs ${
-        connecting ? 'bg-neutral-100 text-neutral-600' : 'bg-amber-100 text-amber-800'
-      }`}
+      role="status"
+      className="absolute right-0 top-0 z-10 inline-flex rounded-md bg-amber-100 px-2 py-1 text-xs text-amber-800 shadow-sm dark:bg-amber-950 dark:text-amber-200"
     >
-      {connecting ? '연결 중' : '오프라인 — 로컬에 저장됩니다'}
+      오프라인 — 로컬에 저장됩니다
     </div>
   )
 }
