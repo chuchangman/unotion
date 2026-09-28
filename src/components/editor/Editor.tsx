@@ -12,7 +12,7 @@ import {
 import { BlockNoteView } from '@blocknote/mantine'
 import { withCollaboration } from '@blocknote/core/yjs'
 import { BlockNoteSchema, defaultBlockSpecs } from '@blocknote/core'
-import { en as coreEn } from '@blocknote/core/locales'
+import { ko as coreKo } from '@blocknote/core/locales'
 import {
   withMultiColumn,
   multiColumnDropCursor,
@@ -250,12 +250,13 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
       /** 블록을 옆으로 끌었을 때 "여기 단을 만든다" 를 보여 주는 커서 */
       dropCursor: multiColumnDropCursor,
       /**
-       * 다단 기능은 사전에 multi_column 키를 요구한다. 코어 기본 사전에는 없다.
-       * 코어는 기존처럼 영어로 두고 이 키만 채운다 — 에디터 UI 언어를
-       * 통째로 바꾸는 건 이번 작업의 범위가 아니다.
-       * (한국어로 쓰려면 coreEn -> ko, multiColumnLocales.en -> .ko 로 바꾸면 된다)
+       * 에디터 UI 언어. 슬래시 메뉴·툴팁·자리표시자가 여기를 따른다.
+       *
+       * ★ multi_column 은 **따로 넣어야 한다.** 코어 기본 사전에 그 키가 없어서
+       *   빼먹으면 다단 메뉴에서 문구를 찾다가 터진다 (별도 패키지라 그렇다).
+       *   코어 언어를 바꿀 때 이쪽도 같은 언어로 맞추는 걸 잊지 말 것.
        */
-      dictionary: { ...coreEn, multi_column: multiColumnLocales.en },
+      dictionary: { ...coreKo, multi_column: multiColumnLocales.ko },
       /**
        * 이미지·파일 업로드. 이게 없으면 BlockNote 는 URL 붙여넣기만 받는다
        * (드래그앤드롭·붙여넣기·"파일 선택"이 전부 죽어 있었다).
