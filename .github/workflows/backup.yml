@@ -29,6 +29,10 @@ jobs:
           sudo sh -c 'echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
           sudo apt-get update -qq
           sudo apt-get install -y postgresql-client-17
+          # 그냥 pg_dump 를 부르면 러너에 원래 깔린 PG16 이 잡힌다 (/usr/bin/pg_dump 는 버전을 고르는 래퍼다).
+          # 서버(17)보다 낮은 pg_dump 는 덤프를 거부하므로 17 바이너리를 PATH 앞에 둔다.
+          # 서버 버전이 올라가면 위 패키지와 이 경로의 숫자를 같이 올린다
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
 
       - name: 덤프 + 암호화
         env:
@@ -39,6 +43,7 @@ jobs:
           test -n "$PGURL" || { echo "SUPABASE_DB_URL secret 이 없습니다"; exit 1; }
           # 암호 없이 올리느니 실패한다
           test -n "$PASSPHRASE" || { echo "BACKUP_PASSPHRASE secret 이 없습니다 (평문 덤프는 올리지 않는다)"; exit 1; }
+          pg_dump --version
           STAMP=$(date -u +%Y%m%d-%H%M)
           # 평문은 업로드 경로(작업 디렉터리) 밖에 둔다
           PLAIN="$RUNNER_TEMP/backup.sql.gz"
