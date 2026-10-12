@@ -4,7 +4,7 @@
  * 보드 뷰. select / status 속성 하나를 기준으로 칸을 나눈다.
  *
  * 카드를 다른 칸에 떨어뜨리면 그 속성 값이 바뀐다 — 보드의 존재 이유가 이것이다.
- * 드래그는 이미 의존성에 있는 @dnd-kit 을 쓴다 (사이드바 트리와 같은 라이브러리).
+ * 드래그는 @dnd-kit/core 를 쓴다 — 칸 사이 이동에 키보드 센서까지 따라온다.
  */
 import type { ReactNode } from 'react'
 import Link from 'next/link'

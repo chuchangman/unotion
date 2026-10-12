@@ -10,29 +10,18 @@
  *   액션이면 타입이 끝까지 이어지고 어댑터 코드도 줄어든다.
  */
 
+import { z } from 'zod'
 import { requireActor } from '@/lib/auth'
 import { summarizeMeeting } from '@/lib/core/summarize'
 import type { MeetingSummary } from '@/lib/core/summarize'
-import { DomainError } from '@/lib/core/errors'
-import type { ActionResult } from './pages'
-
-async function run<T>(fn: () => Promise<T>): Promise<ActionResult<T>> {
-  try {
-    return { ok: true, data: await fn() }
-  } catch (err) {
-    if (err instanceof DomainError) {
-      return { ok: false, code: err.code, message: err.message }
-    }
-    console.error('[action] 예상치 못한 오류', err)
-    return { ok: false, code: 'internal', message: '알 수 없는 오류가 발생했습니다' }
-  }
-}
+import { run, type ActionResult } from '@/lib/action'
+import { Id, parse } from '@/lib/validation'
 
 /**
  * 회의 전문을 요약한다.
  *
  * 전문은 **클라이언트가 보낸다.** 서버의 pages.plain_text 를 읽는 방법도 있지만
- * 그건 2초 디바운스로 저장되는 파생 스냅샷이라, 녹음이 끝나자마자 누르면
+ * 그건 몇 초 디바운스로 저장되는 파생 스냅샷이라, 녹음이 끝나자마자 누르면
  * 마지막 몇 문장이 빠진 채로 요약된다. 에디터가 들고 있는 게 항상 최신이다.
  *
  * 권한은 pageId 로 검사한다 — 본문을 클라이언트가 보낸다고 해서
@@ -42,8 +31,11 @@ export async function summarizePage(
   pageId: string,
   transcript: string,
 ): Promise<ActionResult<MeetingSummary>> {
-  return run(async () => {
+  return run('meetings', async () => {
+    const id = parse(Id, pageId)
+    // 길이 상한과 잘라 읽기는 core 가 한다 (lib/core/summarize.ts)
+    const text = parse(z.string(), transcript)
     const actor = await requireActor()
-    return summarizeMeeting(actor, { pageId, transcript })
+    return summarizeMeeting(actor, { pageId: id, transcript: text })
   })
 }

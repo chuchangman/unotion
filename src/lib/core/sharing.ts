@@ -11,7 +11,7 @@
  */
 import { and, eq, inArray } from 'drizzle-orm'
 import { db } from './db'
-import { pages, pagePermissions, profiles, workspaceMembers } from './schema'
+import { PERMISSION_LEVELS, pages, pagePermissions, profiles, workspaceMembers } from './schema'
 import type { PermissionLevel } from './schema'
 import { InvalidInput, NotFound } from './errors'
 import {
@@ -20,7 +20,7 @@ import {
 import * as audit from './audit'
 import type { Actor } from './actor'
 
-export const LEVELS: readonly PermissionLevel[] = ['read', 'comment', 'edit', 'full']
+const LEVELS: readonly PermissionLevel[] = PERMISSION_LEVELS
 
 export type SharingEntry = {
   userId: string

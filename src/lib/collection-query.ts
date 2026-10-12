@@ -184,7 +184,12 @@ export function applyView(
     const prop = byId.get(s.propId)
     if (!prop) continue
     const dir = s.direction === 'desc' ? -1 : 1
-    out = [...out].sort((a, b) => dir * compare(sortable(prop, a), sortable(prop, b)))
+    out = [...out].sort((a, b) => {
+      const x = sortable(prop, a)
+      const y = sortable(prop, b)
+      // 빈 값은 방향을 뒤집지 않는다 — 내림차순에서도 뒤에 둔다 (compare 의 약속)
+      return x === null || y === null ? compare(x, y) : dir * compare(x, y)
+    })
   }
 
   return out

@@ -3,6 +3,8 @@ import { getPageTree } from '@/lib/core/pages'
 import { countUnread } from '@/lib/core/notifications'
 import { Sidebar } from '@/components/sidebar/Sidebar'
 import { SearchPalette } from '@/components/search/SearchPalette'
+import { QueryProvider } from '@/components/providers/QueryProvider'
+import { WorkspaceLive } from '@/components/live/WorkspaceLive'
 
 /**
  * 탭 이름을 **지금 보고 있는 프로젝트 룸**으로 정한다.
@@ -34,17 +36,21 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   ])
 
   return (
-    <div className="flex h-dvh overflow-hidden">
-      <Sidebar
-        workspace={workspace}
-        workspaces={workspaces}
-        nodes={nodes}
-        user={{ name: displayName }}
-        unread={unread}
-      />
-      <main className="flex-1 overflow-y-auto">{children}</main>
-      {/* 닫혀 있을 때는 아무것도 그리지 않고 서버도 부르지 않는다 */}
-      <SearchPalette workspaceId={workspace.id} />
-    </div>
+    <QueryProvider>
+      <WorkspaceLive workspaceId={workspace.id} enabled={workspace.role !== 'guest'}>
+      <div className="flex h-dvh overflow-hidden">
+        <Sidebar
+          workspace={workspace}
+          workspaces={workspaces}
+          nodes={nodes}
+          user={{ name: displayName }}
+          unread={unread}
+        />
+        <main className="flex-1 overflow-y-auto">{children}</main>
+        {/* 닫혀 있을 때는 아무것도 그리지 않고 서버도 부르지 않는다 */}
+        <SearchPalette workspaceId={workspace.id} />
+      </div>
+      </WorkspaceLive>
+    </QueryProvider>
   )
 }

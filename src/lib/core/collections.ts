@@ -15,7 +15,7 @@
  * 가장 먼저 assert* 를 호출한다.
  */
 import { randomUUID } from 'node:crypto'
-import { and, asc, eq, sql } from 'drizzle-orm'
+import { and, asc, eq, isNotNull, sql, type SQL } from 'drizzle-orm'
 import { generateKeyBetween } from 'fractional-indexing'
 import { db } from './db'
 import { collections, collectionViews, pages } from './schema'
@@ -26,7 +26,7 @@ import * as audit from './audit'
 import * as Pages from './pages'
 import type { Actor } from './actor'
 import {
-  applyView, isDerived as isDerivedType,
+  applyView, hasOptions, isDerived as isDerivedType,
   type CollectionRowData, type ViewConfig,
 } from '@/lib/collection-query'
 
@@ -179,8 +179,9 @@ export async function addProperty(
     config: input.config ?? (needsOptions ? { options: [] } : undefined),
   }
 
+  // 읽어 둔 목록에 붙여 통째로 쓰지 않는다 — 두 사람이 동시에 속성을 추가하면 하나가 사라진다
   await db.update(collections)
-    .set({ schema: [...collection.schema, prop] })
+    .set({ schema: sql`${collections.schema} || ${JSON.stringify([prop])}::jsonb` })
     .where(eq(collections.id, collectionId))
 
   await audit.record(actor, 'collection.add_property', {
@@ -198,22 +199,90 @@ export async function updateProperty(
   patch: { name?: string; config?: Record<string, unknown> },
 ): Promise<PropertyDef> {
   const collection = await assertCanEditCollection(actor, collectionId)
+  if (!collection.schema.some((p) => p.id === propId)) throw new NotFound('Property')
 
-  const idx = collection.schema.findIndex((p) => p.id === propId)
-  if (idx < 0) throw new NotFound('Property')
-
-  const next = [...collection.schema]
-  next[idx] = {
-    ...next[idx],
-    ...(patch.name !== undefined ? { name: patch.name.trim() || next[idx].name } : {}),
+  // 빈 이름은 "그대로 둔다" 로 해석한다
+  const name = patch.name?.trim()
+  const merge: Record<string, unknown> = {
+    ...(name ? { name } : {}),
     ...(patch.config !== undefined ? { config: patch.config } : {}),
   }
 
-  await db.update(collections).set({ schema: next }).where(eq(collections.id, collectionId))
+  const schema = await replaceSchema(collectionId, sql`
+    SELECT coalesce(jsonb_agg(
+             CASE WHEN e->>'id' = ${propId} THEN e || ${JSON.stringify(merge)}::jsonb ELSE e END
+             ORDER BY ord), '[]'::jsonb)
+      FROM jsonb_array_elements(${collections.schema}) WITH ORDINALITY AS t(e, ord)
+  `)
+
   await audit.record(actor, 'collection.update_property', {
     workspaceId: collection.workspaceId, targetId: collectionId, meta: { propId },
   })
-  return next[idx]
+  return findProp(schema, propId)
+}
+
+/**
+ * 선택지(select / multi_select / status) 목록에 **없는 이름만** 덧붙인다.
+ *
+ * 셀에서 처음 쓴 값을 등록할 때 쓴다. 예전에는 클라이언트가 "지금 목록 + 새 값" 을
+ * 만들어 updateProperty 로 config 를 통째로 갈아끼웠다 — 두 사람이 동시에 다른 새 태그를
+ * 쓰면 나중에 쓴 쪽이 먼저 쓴 쪽 태그를 지웠다. 비교와 추가를 한 문장에서 한다.
+ */
+export async function addSelectOptions(
+  actor: Actor,
+  collectionId: string,
+  propId: string,
+  names: string[],
+): Promise<PropertyDef> {
+  const collection = await assertCanEditCollection(actor, collectionId)
+
+  const prop = collection.schema.find((p) => p.id === propId)
+  if (!prop) throw new NotFound('Property')
+  if (!hasOptions(prop.type)) throw new InvalidInput('선택지가 있는 속성이 아닙니다')
+
+  const incoming = [...new Set(names.map((n) => n.trim()).filter(Boolean))]
+    .map((name) => ({ id: randomUUID(), name }))
+  if (incoming.length === 0) return prop
+
+  const schema = await replaceSchema(collectionId, sql`
+    SELECT coalesce(jsonb_agg(
+             CASE WHEN e->>'id' <> ${propId} THEN e
+             ELSE e || jsonb_build_object('config',
+                    coalesce(e->'config', '{}'::jsonb) || jsonb_build_object('options',
+                      coalesce(e->'config'->'options', '[]'::jsonb) || coalesce((
+                        SELECT jsonb_agg(n)
+                          FROM jsonb_array_elements(${JSON.stringify(incoming)}::jsonb) AS n
+                         WHERE NOT EXISTS (
+                           SELECT 1
+                             FROM jsonb_array_elements(coalesce(e->'config'->'options', '[]'::jsonb)) AS o
+                            WHERE o->>'name' = n->>'name')
+                      ), '[]'::jsonb)))
+             END
+             ORDER BY ord), '[]'::jsonb)
+      FROM jsonb_array_elements(${collections.schema}) WITH ORDINALITY AS t(e, ord)
+  `)
+
+  await audit.record(actor, 'collection.add_options', {
+    workspaceId: collection.workspaceId, targetId: collectionId,
+    meta: { propId, names: incoming.map((o) => o.name) },
+  })
+  return findProp(schema, propId)
+}
+
+/** schema 를 "지금 DB 에 있는 schema 로 계산한 식" 으로 바꾼다 — 읽고-고치고-쓰기 사이에 끼어들 틈이 없다 */
+async function replaceSchema(collectionId: string, next: SQL): Promise<PropertyDef[]> {
+  const [row] = await db.update(collections)
+    .set({ schema: sql`(${next})` })
+    .where(eq(collections.id, collectionId))
+    .returning({ schema: collections.schema })
+  if (!row) throw new NotFound('Collection')
+  return row.schema
+}
+
+function findProp(schema: PropertyDef[], propId: string): PropertyDef {
+  const prop = schema.find((p) => p.id === propId)
+  if (!prop) throw new NotFound('Property')
+  return prop
 }
 
 /**
@@ -230,9 +299,11 @@ export async function deleteProperty(
   if (!prop) throw new NotFound('Property')
   if (prop.type === 'title') throw new InvalidInput('제목 속성은 지울 수 없습니다')
 
-  await db.update(collections)
-    .set({ schema: collection.schema.filter((p) => p.id !== propId) })
-    .where(eq(collections.id, collectionId))
+  await replaceSchema(collectionId, sql`
+    SELECT coalesce(jsonb_agg(e ORDER BY ord), '[]'::jsonb)
+      FROM jsonb_array_elements(${collections.schema}) WITH ORDINALITY AS t(e, ord)
+     WHERE e->>'id' <> ${propId}
+  `)
 
   if (!isDerivedType(prop.type)) {
     await db.update(pages)
@@ -356,23 +427,30 @@ export async function updateRowProperties(
 ): Promise<CollectionRowData> {
   const access = await assertCanEdit(actor.userId, pageId)
 
-  const [current] = await db
-    .select({ properties: pages.properties, collectionId: pages.collectionId })
-    .from(pages).where(eq(pages.id, pageId)).limit(1)
-  if (!current) throw new NotFound('Page')
-  if (!current.collectionId) throw new InvalidInput('데이터베이스의 행이 아닙니다')
-
   // null / undefined 로 온 키는 "값 지우기"로 해석한다
-  const merged: Record<string, unknown> = { ...(current.properties as Record<string, unknown>) }
+  const set: Record<string, unknown> = {}
+  const remove: string[] = []
   for (const [k, v] of Object.entries(patch)) {
-    if (v === undefined || v === null) delete merged[k]
-    else merged[k] = v
+    if (v === undefined || v === null) remove.push(k)
+    else set[k] = v
   }
 
+  /**
+   * DB 에 있는 값 위에서 **바뀐 키만** 고친다 (jsonb `||` 로 덮고 `-` 로 뗀다).
+   * 예전에는 읽어서 JS 에서 합친 뒤 통째로 썼다 — 두 사람이 같은 행의 다른 칸을
+   * 동시에 고치면 나중에 쓴 쪽이 먼저 쓴 칸을 옛 값으로 되돌렸다.
+   */
+  let properties = sql`(${pages.properties} || ${JSON.stringify(set)}::jsonb)`
+  for (const key of remove) properties = sql`${properties} - ${key}::text`
+
   const [row] = await db.update(pages)
-    .set({ properties: merged, lastEditedBy: actor.userId, updatedAt: new Date() })
-    .where(eq(pages.id, pageId))
+    .set({ properties, lastEditedBy: actor.userId, updatedAt: new Date() })
+    .where(and(eq(pages.id, pageId), isNotNull(pages.collectionId)))
     .returning()
+  if (!row) {
+    // 권한 검사를 통과했으니 페이지는 있다 — 행이 아닌 것이다
+    throw new InvalidInput('데이터베이스의 행이 아닙니다')
+  }
 
   await audit.record(actor, 'collection.update_row', {
     workspaceId: access.workspaceId, targetId: pageId, meta: { keys: Object.keys(patch) },

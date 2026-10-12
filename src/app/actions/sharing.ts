@@ -7,36 +7,24 @@
  * 바꾼 사람 본인의 화면도 다시 그려야 "지금 이 페이지를 계속 볼 수 있나"가 맞게 나온다.
  */
 import { revalidatePath } from 'next/cache'
+import { z } from 'zod'
 import { requireActor } from '@/lib/auth'
 import * as Sharing from '@/lib/core/sharing'
 import * as PublicShares from '@/lib/core/public-share'
-import { DomainError } from '@/lib/core/errors'
+import { PERMISSION_LEVELS } from '@/lib/core/schema'
 import type { PermissionLevel } from '@/lib/core/schema'
 import type { SharingEntry } from '@/lib/core/sharing'
 import type { PublicShare } from '@/lib/core/public-share'
-
-export type ActionResult<T> =
-  | { ok: true; data: T }
-  | { ok: false; code: string; message: string }
-
-async function run<T>(fn: () => Promise<T>): Promise<ActionResult<T>> {
-  try {
-    return { ok: true, data: await fn() }
-  } catch (err) {
-    if (err instanceof DomainError) {
-      return { ok: false, code: err.code, message: err.message }
-    }
-    console.error('[action:sharing] 예상치 못한 오류', err)
-    return { ok: false, code: 'internal', message: '알 수 없는 오류가 발생했습니다' }
-  }
-}
+import { run, type ActionResult } from '@/lib/action'
+import { Id, parse } from '@/lib/validation'
 
 export async function getPageSharing(
   pageId: string,
 ): Promise<ActionResult<{ entries: SharingEntry[]; canManage: boolean }>> {
-  return run(async () => {
+  return run('sharing', async () => {
+    const id = parse(Id, pageId)
     const actor = await requireActor()
-    return Sharing.getPageSharing(actor, pageId)
+    return Sharing.getPageSharing(actor, id)
   })
 }
 
@@ -45,9 +33,12 @@ export async function setPagePermission(
   userId: string,
   level: PermissionLevel,
 ): Promise<ActionResult<null>> {
-  return run(async () => {
+  return run('sharing', async () => {
+    const id = parse(Id, pageId)
+    const user = parse(Id, userId)
+    const valid = parse(z.enum(PERMISSION_LEVELS, '알 수 없는 권한 등급입니다'), level)
     const actor = await requireActor()
-    await Sharing.setPagePermission(actor, pageId, userId, level)
+    await Sharing.setPagePermission(actor, id, user, valid)
     revalidatePath('/', 'layout')
     return null
   })
@@ -57,9 +48,11 @@ export async function clearPagePermission(
   pageId: string,
   userId: string,
 ): Promise<ActionResult<null>> {
-  return run(async () => {
+  return run('sharing', async () => {
+    const id = parse(Id, pageId)
+    const user = parse(Id, userId)
     const actor = await requireActor()
-    await Sharing.clearPagePermission(actor, pageId, userId)
+    await Sharing.clearPagePermission(actor, id, user)
     revalidatePath('/', 'layout')
     return null
   })
@@ -70,9 +63,10 @@ export async function clearPagePermission(
 export async function getPublicShare(
   pageId: string,
 ): Promise<ActionResult<PublicShare | null>> {
-  return run(async () => {
+  return run('sharing', async () => {
+    const id = parse(Id, pageId)
     const actor = await requireActor()
-    return PublicShares.getPublicShare(actor, pageId)
+    return PublicShares.getPublicShare(actor, id)
   })
 }
 
@@ -80,16 +74,18 @@ export async function createPublicShare(
   pageId: string,
   allowIndexing = false,
 ): Promise<ActionResult<PublicShare>> {
-  return run(async () => {
+  return run('sharing', async () => {
+    const id = parse(Id, pageId)
     const actor = await requireActor()
-    return PublicShares.createPublicShare(actor, pageId, { allowIndexing })
+    return PublicShares.createPublicShare(actor, id, { allowIndexing: parse(z.boolean(), allowIndexing) })
   })
 }
 
 export async function revokePublicShare(pageId: string): Promise<ActionResult<null>> {
-  return run(async () => {
+  return run('sharing', async () => {
+    const id = parse(Id, pageId)
     const actor = await requireActor()
-    await PublicShares.revokePublicShare(actor, pageId)
+    await PublicShares.revokePublicShare(actor, id)
     return null
   })
 }

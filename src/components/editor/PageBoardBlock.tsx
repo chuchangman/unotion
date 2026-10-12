@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { createReactBlockSpec } from '@blocknote/react'
 import { FileText, Plus } from 'lucide-react'
 import {
@@ -11,7 +12,10 @@ import {
   serializeColumns,
   type BoardColumn,
 } from '@/lib/page-board'
-import { listChildPagesBatch, createLinkedChildPage } from '@/app/actions/pages'
+import { createLinkedChildPage } from '@/app/actions/pages'
+import { getJson } from '@/lib/api/client'
+import { qk } from '@/lib/query-keys'
+import { useWorkspaceSignal } from '@/components/live/WorkspaceLive'
 
 type Child = { id: string; title: string; icon: { type: 'emoji' | 'url'; value: string } | null }
 
@@ -40,6 +44,7 @@ function BoardColumnView({
   onChanged: () => void
 }) {
   const [busy, setBusy] = useState(false)
+  const emit = useWorkspaceSignal()
 
   const addPage = async () => {
     if (!workspaceId) return
@@ -51,6 +56,7 @@ function BoardColumnView({
     })
     setBusy(false)
     if (res.ok) {
+      emit({ kind: 'tree' })
       onChanged()
       onOpen(res.data.id)
     } else {
@@ -109,12 +115,12 @@ function BoardColumnView({
 }
 
 /**
- * 페이지 보드 블록.
+ * 페이지 보드 블록 — 칸마다 "어떤 페이지의 하위 페이지 목록" 을 나란히 보여 준다.
  *
- * 노션의 멀티컬럼 패키지를 쓰지 않는다 — 공식 @blocknote/xl-multi-column 은
- * GPL-3.0 이거나 유료라 회사 위키에 얹기 부담스럽다.
- * 필요한 건 범용 컬럼 시스템이 아니라 이 화면 하나이므로
- * 블록 안에서 자체 레이아웃과 리사이즈를 구현한다.
+ * 본문을 좌우로 나누는 다단(@blocknote/xl-multi-column)과는 다른 것이다. 다단은 **블록**을
+ * 배치하고, 이건 하위 페이지 **목록**을 보여 준다. 보드가 먼저 생겼고, 그때는 다단 패키지의
+ * 라이선스(GPL-3.0) 때문에 자체 레이아웃과 리사이즈를 짰다. 지금은 다단도 쓰지만
+ * (LICENSE 참고) 보드는 칸 폭 조절까지 여기서 끝나므로 그대로 둔다.
  */
 export const PageBoardBlock = createReactBlockSpec(
   {
@@ -145,19 +151,21 @@ export const PageBoardBlock = createReactBlockSpec(
        * key 는 pageId 목록이라 폭을 드래그해도 다시 조회하지 않는다.
        */
       const parentKey = columns.map((c) => c.pageId).join(',')
-      const [lists, setLists] = useState<Record<string, Child[]> | null>(null)
-      const [reloadTick, setReloadTick] = useState(0)
+      const queryClient = useQueryClient()
+      const children = useQuery({
+        queryKey: qk.children(parentKey),
+        queryFn: () =>
+          getJson<{ lists: Record<string, Child[]> }>(
+            `/api/pages/children?parents=${encodeURIComponent(parentKey)}`,
+          ).then((r) => r.lists),
+        enabled: parentKey.length > 0,
+      })
+      // 실패하면 칸마다 "아직 페이지가 없습니다" 로 둔다 (예전과 같다)
+      const lists = children.data ?? (children.isError ? {} : null)
 
-      useEffect(() => {
-        if (!parentKey) return
-        let cancelled = false
-        void listChildPagesBatch(parentKey.split(',')).then((res) => {
-          if (!cancelled) setLists(res.ok ? res.data : {})
-        })
-        return () => { cancelled = true }
-      }, [parentKey, reloadTick])
-
-      const reload = useCallback(() => setReloadTick((t) => t + 1), [])
+      const reload = useCallback(() => {
+        void queryClient.invalidateQueries({ queryKey: qk.children(parentKey) })
+      }, [queryClient, parentKey])
 
       const open = (pageId: string) => {
         const qs = new URLSearchParams(window.location.search)

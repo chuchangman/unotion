@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as Y from 'yjs'
+import { Awareness } from 'y-protocols/awareness'
 import { IndexeddbPersistence } from 'y-indexeddb'
 import {
   useCreateBlockNote,
@@ -26,22 +27,27 @@ import '@blocknote/core/fonts/inter.css'
 import '@blocknote/mantine/style.css'
 
 import { createClient } from '@/lib/supabase/client'
-import { SupabaseYjsProvider, type ProviderStatus } from '@/lib/realtime/supabase-yjs-provider'
-import { blocksToPlainText, blocksToPageLinks } from '@/lib/blocks'
+import {
+  SupabaseYjsProvider, type ProviderStatus, type SaveStatus, type SyncTransport,
+} from '@/lib/realtime/supabase-yjs-provider'
+import { getJson, pullYdoc, pushYdoc } from '@/lib/api/client'
+import { FRAGMENT } from '@/lib/ydoc'
+import { blocksToPlainText } from '@/lib/blocks'
 import { resolveUpload } from '@/lib/upload'
 import { formatOffset } from '@/lib/transcribe'
 import type { MeetingSummary } from '@/lib/transcribe'
 import { MeetingRecorder } from './MeetingRecorder'
-import { bytesToBase64, base64ToBytes } from '@/lib/base64'
-import { loadYdoc, savePage, searchPagesForLink, createLinkedChildPage, snapshotVersion } from '@/app/actions/pages'
+import { createLinkedChildPage } from '@/app/actions/pages'
+import { qk } from '@/lib/query-keys'
 import { filterSuggestionItems } from '@blocknote/core/extensions'
 import { FileText, FilePlus } from 'lucide-react'
 import { useRouter } from 'next/navigation'
+import { useQueryClient } from '@tanstack/react-query'
+import { useWorkspaceSignal } from '@/components/live/WorkspaceLive'
+import { colorFor, publishPresence } from '@/lib/realtime/presence'
 
-const USER_COLORS = ['#ef4444', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ec4899']
-
-/** 되돌리기 스냅샷을 남기는 최소 간격. 서버(pages.ts VERSION_MIN_GAP_MS)와 같은 값이다. */
-const VERSION_SNAPSHOT_GAP_MS = 10 * 60 * 1000
+/** 본문 @링크 후보 (api/workspaces/[id]/link-search) */
+type LinkTarget = { id: string; title: string; icon: { type: 'emoji' | 'url'; value: string } | null }
 
 /** 본문에 붙는 이미지·파일 버킷 (drizzle/0003_storage.sql) */
 const FILE_BUCKET = 'page-files'
@@ -95,136 +101,60 @@ async function uploadToStorage(
   }
 }
 
-/**
- * 자동저장 콜백이 읽고 쓰는 가변 상태.
- *
- * 렌더 결과에는 안 쓰이고 저장 콜백에서만 읽고 쓴다. 나눠 놓을 이유가 없어
- * ref 하나에 모아 두고, 그 ref 를 만지는 코드는 전부 이펙트 안에 둔다
- * (렌더 단계에서 ref 를 건드리면 React 컴파일러가 막는다 — react-hooks/refs).
- */
-type SaveState = {
-  /** 파생 스냅샷(contentJson/plainText)의 출처. 에디터가 생긴 뒤 이펙트에서 연결한다 */
-  getBlocks: (() => unknown) | null
-  title: string
-  /** 마지막으로 서버에 보낸 링크 목록의 서명. null 이면 아직 안 보냈다는 뜻 */
-  lastLinks: string | null
-  /** 되돌리기 스냅샷을 남긴 시각. 0 으로 시작하므로 첫 저장은 항상 스냅샷을 남긴다 */
-  lastSnapshotAt: number
-}
-
-/**
- * 저장 본체.
- *
- * 컴포넌트 **밖에** 둔다. provider 를 만드는 useMemo 는 렌더 단계 코드라
- * 그 안에서 `ref.current` 를 읽으면 컴파일러가 "렌더 중 ref 접근"으로 막는다
- * (실제로는 2초 뒤 저장 콜백에서 실행된다). ref 는 넘기기만 하고 값 읽기는 여기서 한다.
- */
-async function saveUpdate(pageId: string, update: Uint8Array, st: SaveState) {
-  /**
-   * 저장 **직전에** 되돌리기용 스냅샷을 남긴다.
-   * 이 시점의 서버 ydoc 에는 아직 이번 편집이 반영되지 않았으므로,
-   * 결과적으로 "편집을 시작하기 직전 상태"가 버전으로 남는다.
-   *
-   * 서버 액션은 클라이언트당 순차 디스패치라 이 호출이 아래 savePage 보다
-   * 먼저 도착하는 것이 보장된다. 10분에 한 번만 부르고, 서버도 같은 간격으로
-   * 한 번 더 막는다 (여러 명이 같은 문서를 편집하는 경우).
-   */
-  const now = Date.now()
-  if (now - st.lastSnapshotAt > VERSION_SNAPSHOT_GAP_MS) {
-    st.lastSnapshotAt = now
-    // 스냅샷 실패가 저장을 막아서는 안 된다
-    snapshotVersion(pageId).catch(() => {})
-  }
-
-  const blocks = st.getBlocks?.() ?? null
-
-  /**
-   * 백링크용 링크 목록은 **바뀌었을 때만** 실어 보낸다.
-   * 매 저장(2초)마다 보내면 서버가 링크 테이블을 지웠다 다시 넣느라
-   * 쓰기 왕복이 두 개씩 늘어난다.
-   */
-  const links = blocksToPageLinks(blocks)
-  const signature = links.join(',')
-  const linksChanged = signature !== st.lastLinks
-  if (linksChanged) st.lastLinks = signature
-
-  const res = await savePage(pageId, {
-    ydocB64: bytesToBase64(update),
-    plainText: blocksToPlainText(blocks),
-    title: st.title,
-    ...(linksChanged ? { links } : {}),
-  })
-  if (!res.ok) console.error('[editor] 저장 실패', res.message)
-}
-
-function colorFor(id: string) {
-  let h = 0
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0
-  return USER_COLORS[Math.abs(h) % USER_COLORS.length]
-}
 
 export type EditorProps = {
   pageId: string
   workspaceId: string
-  title: string
   user: { id: string; name: string }
   canEdit: boolean
 }
 
-export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProps) {
+export function Editor({ pageId, workspaceId, user, canEdit }: EditorProps) {
   const router = useRouter()
   const [status, setStatus] = useState<ProviderStatus>('connecting')
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle')
   const [ready, setReady] = useState(false)
 
   /**
    * 마운트당 한 번만 만든다. 페이지가 바뀔 때 새 문서가 필요한 것은 맞지만,
    * 그건 부모가 `key={pageId}` 로 리마운트해서 해결한다 — useMemo 의 의존성으로
    * 흉내 내면 React 가 캐시를 버릴 때 문서가 갈리고, 린터도 쓰지 않는 의존성으로 잡는다.
+   *
+   * awareness(커서·접속자)도 여기서 만든다. BlockNote 가 **렌더 단계에서** 받아야 해서
+   * 이펙트 안에서 만드는 프로바이더에 둘 수 없다. 프로바이더는 빌려 쓰기만 한다.
    */
   const [doc] = useState(() => new Y.Doc())
+  const [awareness] = useState(() => new Awareness(doc))
   const [supabase] = useState(() => createClient())
+  const provider = useRef<SupabaseYjsProvider | null>(null)
 
   /**
-   * 저장 시 파생 스냅샷이 필요한데 그 출처는 에디터다. 프로바이더가 에디터보다
-   * 먼저 만들어져야 하므로(BlockNote 가 provider 를 받는다) ref 로 순환을 끊는다.
-   */
-  const saveState = useRef<SaveState>({
-    getBlocks: null,
-    title,
-    lastLinks: null,
-    lastSnapshotAt: 0,
-  })
-
-  // 초기값이 이미 title 이므로 이 이펙트는 "이후 변경"만 따라간다
-  useEffect(() => { saveState.current.title = title }, [title])
-
-  const provider = useMemo(() => new SupabaseYjsProvider({
-    supabase,
-    pageId,
-    doc,
-    user: { id: user.id, name: user.name, color: colorFor(user.id) },
-    onStatus: setStatus,
-    load: async () => {
-      const res = await loadYdoc(pageId)
-      if (!res.ok) {
-        console.error('[editor] 스냅샷 로드 실패', res.message)
-        return null
-      }
-      return res.data ? base64ToBytes(res.data) : null
-    },
-  }), [supabase, pageId, doc, user.id, user.name])
-
-  /**
-   * 저장 콜백을 꽂는다.
-   *
-   * 생성자에 넣지 못하는 이유는 프로바이더의 `saveFn` 주석에 있다. 이 이펙트는
-   * connect() 이펙트보다 **위에** 선언되어 있어 항상 먼저 실행되고,
-   * 저장은 최소 3초 디바운스라 콜백 없이 저장 시점이 오는 일은 없다.
+   * 접속자 표시용. BlockNote 가 쓰는 'user' 필드와 겹치지 않게 따로 둔다.
+   * 아바타는 도구 모음(PresenceAvatars)이 그리므로 pageId 로 걸어 둔다.
    */
   useEffect(() => {
-    const st = saveState.current
-    provider.setSave((update) => saveUpdate(pageId, update, st))
-  }, [provider, pageId])
+    awareness.setLocalStateField('presence', { id: user.id, name: user.name })
+  }, [awareness, user.id, user.name])
+  useEffect(() => publishPresence(pageId, awareness, user.id), [pageId, awareness, user.id])
+
+  /**
+   * 문서와 awareness 는 **진짜로 사라질 때만** 부순다.
+   *
+   * StrictMode 는 개발 중 마운트 → 언마운트 → 마운트를 한 번 더 흉내 낸다. 정리 함수에서
+   * 바로 부수면 두 번째 마운트가 부서진 awareness 를 쓰게 되어 커서가 사라진다.
+   * 그래서 한 틱 미루고, 다시 마운트되면 취소한다. 안 부수면 awareness 의 3초 타이머가
+   * 문서를 붙잡고 있어서 문서를 옮겨 다닐 때마다 메모리가 샌다.
+   */
+  const disposeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (disposeTimer.current) clearTimeout(disposeTimer.current)
+    return () => {
+      disposeTimer.current = setTimeout(() => {
+        awareness.destroy()
+        doc.destroy()
+      }, 0)
+    }
+  }, [awareness, doc])
 
   // BlockNote 0.54: 협업은 @blocknote/core/yjs 의 withCollaboration 으로 주입한다.
   // provider 는 객체 전체가 아니라 awareness 만 넘긴다.
@@ -295,44 +225,56 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
         },
       },
       collaboration: {
-        fragment: doc.getXmlFragment('blocknote'),
+        fragment: doc.getXmlFragment(FRAGMENT),
         user: { name: user.name, color: colorFor(user.id) },
-        provider: { awareness: provider.awareness },
+        provider: { awareness },
       },
     }),
-    [provider],
+    [awareness],
   )
 
-  // 에디터가 생기면 파생 스냅샷 게터를 연결한다
-  useEffect(() => {
-    const st = saveState.current
-    st.getBlocks = () => editor.document
-    return () => { st.getBlocks = null }
-  }, [editor])
-
-  // 오프라인 보존 + 재접속 시 자동 머지
-  useEffect(() => {
-    const idb = new IndexeddbPersistence(`page-${pageId}`, doc)
-    return () => { void idb.destroy() }
-  }, [pageId, doc])
-
-  // StrictMode 는 개발 중 이펙트를 두 번 실행한다. 가드가 없으면 connect() 가
-  // 두 번 돌아 서버 스냅샷을 중복으로 읽는다 (로그에서 loadYdoc 4회로 보였다).
-  const connected = useRef<SupabaseYjsProvider | null>(null)
+  /**
+   * 동기화 연결. 서버(HTTP) + 동료(broadcast) + 로컬(IndexedDB) — 프로바이더 머리 주석 참고.
+   *
+   * 이펙트마다 새 프로바이더를 만들고 정리 함수에서 부순다. StrictMode 의 이중 실행에도
+   * 앞의 것이 온전히 정리되고 뒤의 것이 새로 붙는다 (개발 중에는 서버를 두 번 읽는다).
+   * 예전에는 한 프로바이더를 두고 "이미 붙였나" 를 ref 로 가렸는데, 정리 함수가 그걸
+   * 부순 뒤 두 번째 실행이 부서진 프로바이더에 connect() 를 걸어 동기화가 안 붙었다.
+   */
   useEffect(() => {
     let cancelled = false
-    if (connected.current !== provider) {
-      connected.current = provider
-      provider.connect().then(() => { if (!cancelled) setReady(true) })
-    } else {
-      setReady(true)
+    const transport: SyncTransport = {
+      pull: (sv) => pullYdoc(pageId, sv),
+      push: (update, opts) => pushYdoc(pageId, update, opts),
     }
+    const p = new SupabaseYjsProvider({
+      supabase,
+      pageId,
+      doc,
+      awareness,
+      transport,
+      canSave: canEdit,
+      // 오프라인 보존 + 재접속 시 자동 머지
+      persistence: (d) => new IndexeddbPersistence(`page-${pageId}`, d),
+      onStatus: setStatus,
+      onSaveStatus: setSaveStatus,
+    })
+    provider.current = p
+    void p.connect()
+      .then(() => { if (!cancelled) setReady(true) })
+      .catch((err) => {
+        // 세션을 못 읽는 등 연결 자체가 실패했다 — "불러오는 중" 에 멈추지 말고 로컬 내용이라도 보여 준다
+        console.error('[editor] 동기화 연결 실패', err)
+        if (cancelled) return
+        setStatus('disconnected')
+        setReady(true)
+      })
     return () => {
       cancelled = true
-      provider.destroy()
-      connected.current = null
+      p.destroy()
+      if (provider.current === p) provider.current = null
     }
-  }, [provider])
+  }, [supabase, pageId, doc, awareness, canEdit])
 
   /**
    * 페이지 링크 삽입.
@@ -482,25 +424,43 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
    *
    * SuggestionMenuController 는 키 입력마다 이걸 부른다.
    * 그대로 두면 한 글자당 DB 왕복이 하나씩 나가므로 짧게 눌러 담는다.
-   * 캐시는 같은 질의가 연달아 올 때(백스페이스 등) 왕복을 아낀다.
+   * 같은 질의가 연달아 오면(백스페이스 등) Query 캐시로 바로 그린다.
+   *
+   * 뒤에 온 입력에 밀린 호출은 빈 목록으로 **끝낸다**. 예전에는 타이머만 지워서
+   * 밀린 호출의 promise 가 영영 안 끝났다 (키 입력 수만큼 매달려 있었다).
    */
-  const mentionCache = useRef(new Map<string, DefaultReactSuggestionItem[]>())
-  const mentionTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const queryClient = useQueryClient()
+  const emit = useWorkspaceSignal()
+  const mentionWait = useRef<(() => void) | null>(null)
 
   const getPageMentions = useCallback(
     async (query: string): Promise<DefaultReactSuggestionItem[]> => {
-      const cached = mentionCache.current.get(query)
-      if (cached) return cached
+      const key = qk.linkSearch(workspaceId, query)
+      let found = queryClient.getQueryData<LinkTarget[]>(key)
 
-      // 마지막 입력에서 180ms 조용해질 때까지 기다린다
-      if (mentionTimer.current) clearTimeout(mentionTimer.current)
-      await new Promise<void>((resolve) => {
-        mentionTimer.current = setTimeout(resolve, 180)
-      })
+      if (!found) {
+        // 마지막 입력에서 180ms 조용해질 때까지 기다린다
+        mentionWait.current?.()
+        const proceed = await new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => resolve(true), 180)
+          mentionWait.current = () => { clearTimeout(timer); resolve(false) }
+        })
+        if (!proceed) return []
 
-      const res = await searchPagesForLink(workspaceId, query)
-      const items: DefaultReactSuggestionItem[] = res.ok
-        ? res.data
+        found = await queryClient.fetchQuery({
+          queryKey: key,
+          queryFn: () =>
+            getJson<{ pages: LinkTarget[] }>(
+              `/api/workspaces/${workspaceId}/link-search?q=${encodeURIComponent(query)}`,
+            ).then((r) => r.pages),
+          staleTime: 30_000,
+        }).catch((err) => {
+          console.error('[editor] 페이지 링크 검색 실패', err)
+          return [] as LinkTarget[]
+        })
+      }
+
+      const items: DefaultReactSuggestionItem[] = found
             .filter((pg) => pg.id !== pageId) // 자기 자신은 제외
             .map((pg) => ({
               title: pg.title || '제목 없음',
@@ -510,7 +470,6 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
               group: '페이지 링크',
               onItemClick: () => insertPageLink(pg),
             }))
-        : []
 
       // 검색 결과가 없으면 그 이름으로 하위 페이지를 만든다
       if (query.trim()) {
@@ -525,6 +484,7 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
               })
               if (created.ok) {
                 insertPageLink(created.data)
+                emit({ kind: 'tree' })
                 router.refresh() // 사이드바 트리 갱신
               } else {
                 console.error('[editor] 하위 페이지 생성 실패', created.message)
@@ -534,12 +494,9 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
         })
       }
 
-      // 새로 만들기 항목은 질의에 따라 달라지므로 캐시에는 검색 결과만 넣는다
-      mentionCache.current.set(query, items)
-      if (mentionCache.current.size > 50) mentionCache.current.clear()
       return items
     },
-    [workspaceId, pageId, insertPageLink, router],
+    [workspaceId, pageId, insertPageLink, router, queryClient, emit],
   )
 
   /** 슬래시 메뉴에 추가할 항목 */
@@ -557,6 +514,7 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
           })
           if (created.ok) {
             insertPageLink(created.data)
+            emit({ kind: 'tree' })
             router.refresh()
           } else {
             console.error('[editor] 하위 페이지 생성 실패', created.message)
@@ -592,27 +550,34 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
             editor.getTextCursorPosition().block,
             'after',
           )
+          emit({ kind: 'tree' })
           router.refresh()
         })()
       },
     },
-  ], [workspaceId, pageId, insertPageLink, router, editor])
+  ], [workspaceId, pageId, insertPageLink, router, editor, emit])
 
-  // 탭 닫힘 / 백그라운드 전환 시 마지막 저장
+  /**
+   * 탭 닫힘 / 백그라운드 전환 → 마지막 저장 (keepalive — 페이지가 사라져도 요청은 간다)
+   * 탭 복귀 → 떠나 있던 사이 서버에 쌓인 것을 받아 온다 (MCP 가 붙인 문단 등)
+   */
   useEffect(() => {
-    const flush = () => { void provider.flush() }
-    const onHidden = () => { if (document.visibilityState === 'hidden') flush() }
+    const flush = () => { void provider.current?.flush({ keepalive: true }) }
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flush()
+      else provider.current?.refresh()
+    }
     window.addEventListener('pagehide', flush)
-    document.addEventListener('visibilitychange', onHidden)
+    document.addEventListener('visibilitychange', onVisibility)
     return () => {
       window.removeEventListener('pagehide', flush)
-      document.removeEventListener('visibilitychange', onHidden)
+      document.removeEventListener('visibilitychange', onVisibility)
     }
-  }, [provider])
+  }, [])
 
   return (
     <div className="relative">
-      <ConnectionBadge status={status} />
+      <StatusBadge connection={status} save={saveStatus} />
 
       {/*
         회의 받아쓰기. 읽기 전용으로 열었으면 아예 그리지 않는다 —
@@ -671,27 +636,40 @@ export function Editor({ pageId, workspaceId, title, user, canEdit }: EditorProp
 }
 
 /**
- * 연결이 **끊겼을 때만** 알린다.
+ * 연결이 끊겼거나 저장이 안 될 때**만** 알린다.
  *
- * ★ "연결 중" 은 일부러 안 띄운다.
+ * ★ "연결 중" · "저장 중" 은 일부러 안 띄운다.
  *   문서를 열 때마다 잠깐 떴다 사라지는데, 이 배지가 문서 흐름 안에 있어서
  *   나타날 때 본문을 아래로 밀고 사라질 때 위로 튕겼다. 문서를 옮길 때마다
  *   화면이 두 번 움직이니 실제보다 훨씬 버벅이는 것처럼 보였다.
- *   연결은 대개 순식간이고, "되는 중" 이라는 정보는 사용자의 행동을 바꾸지 않는다.
- *   알려야 할 건 **안 될 때** 뿐이다.
+ *   "되는 중" 이라는 정보는 사용자의 행동을 바꾸지 않는다. 알려야 할 건 **안 될 때** 뿐이다.
+ *
+ * ★ 저장 실패를 알리는 이유
+ *   예전에는 실패가 콘솔에만 남았다. 로컬(IndexedDB)에는 남아 있어도 다른 사람과
+ *   MCP 는 옛 내용을 본다 — 쓰는 사람이 그걸 알아야 새로고침이든 복사든 한다.
  *
  * ★ absolute 로 띄우는 이유도 같다.
- *   오프라인 배지가 흐름 안에 있으면 끊기는 순간 본문이 통째로 밀린다.
+ *   배지가 흐름 안에 있으면 나타나는 순간 본문이 통째로 밀린다.
  *   편집 중이라면 커서 위치까지 눈에서 놓친다.
  */
-function ConnectionBadge({ status }: { status: ProviderStatus }) {
-  if (status !== 'disconnected') return null
+function StatusBadge({ connection, save }: { connection: ProviderStatus; save: SaveStatus }) {
+  const message =
+    save === 'forbidden' ? '편집 권한이 없어져 저장되지 않습니다 — 새로고침해 주세요'
+    : save === 'unauthorized' ? '로그인이 만료돼 저장이 멈췄습니다 — 다시 로그인하면 이어서 저장됩니다'
+    : save === 'retrying' ? '저장하지 못해 다시 시도하는 중 — 이 기기에는 남아 있습니다'
+    : connection === 'disconnected' ? '오프라인 — 로컬에 저장됩니다'
+    : null
+  if (!message) return null
+
+  const tone = save === 'forbidden' || save === 'unauthorized'
+    ? 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200'
+    : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200'
   return (
     <div
       role="status"
-      className="absolute right-0 top-0 z-10 inline-flex rounded-md bg-amber-100 px-2 py-1 text-xs text-amber-800 shadow-sm dark:bg-amber-950 dark:text-amber-200"
+      className={`absolute right-0 top-0 z-10 inline-flex rounded-md px-2 py-1 text-xs shadow-sm ${tone}`}
     >
-      오프라인 — 로컬에 저장됩니다
+      {message}
     </div>
   )
 }

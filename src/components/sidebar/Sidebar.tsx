@@ -1,14 +1,15 @@
 'use client'
 
 import Link from 'next/link'
-import { useRouter } from 'next/navigation'
-import { useTransition } from 'react'
-import { KeyRound, Plus, Search, Trash2, Users } from 'lucide-react'
+import { usePathname, useRouter } from 'next/navigation'
+import { useState, useTransition } from 'react'
+import { KeyRound, Menu, Plus, Search, Trash2, Users } from 'lucide-react'
 import { createPage } from '@/app/actions/pages'
 import { OPEN_SEARCH_EVENT } from '@/components/search/SearchPalette'
 import { NotificationBell } from '@/components/notifications/NotificationBell'
 import { PageTree } from './PageTree'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
+import { useWorkspaceSignal } from '@/components/live/WorkspaceLive'
 import type { TreeNode } from '@/lib/core/pages'
 import type { MyWorkspace } from '@/lib/core/workspaces'
 import type { WorkspaceRole } from '@/lib/core/permissions'
@@ -26,15 +27,55 @@ export function Sidebar({ workspace, workspaces, nodes, user, unread }: Props) {
   const router = useRouter()
   const [pending, start] = useTransition()
 
+  const emit = useWorkspaceSignal()
+
+  /**
+   * 휴대폰에서는 사이드바가 서랍이다 (md 미만). 폭 256px 를 늘 깔아 두면
+   * 본문이 화면의 1/3 밖에 안 남는다.
+   *
+   * 열 때의 경로를 기억해 두고 "지금 경로와 같을 때만 열림" 으로 본다.
+   * 그러면 문서를 눌러 이동하는 순간 effect 없이 저절로 닫힌다.
+   */
+  const pathname = usePathname()
+  const [openedAt, setOpenedAt] = useState<string | null>(null)
+  const open = openedAt === pathname
+  const close = () => setOpenedAt(null)
+
   const addRootPage = () =>
     start(async () => {
       const res = await createPage({ workspaceId: workspace.id, parentId: null })
-      if (res.ok) router.push(`/p/${res.data.id}`)
-      else alert(res.message)
+      if (!res.ok) {
+        alert(res.message)
+        return
+      }
+      emit({ kind: 'tree' }) // 다른 사람의 사이드바도
+      router.push(`/p/${res.data.id}`)
     })
 
   return (
-    <aside className="flex h-dvh w-64 shrink-0 flex-col border-r border-neutral-200 bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-950">
+    <>
+    <button
+      type="button"
+      onClick={() => setOpenedAt(pathname)}
+      aria-label="메뉴 열기"
+      className="fixed left-2 top-2 z-20 rounded-md bg-white/80 p-2 text-neutral-600 backdrop-blur hover:bg-neutral-100 md:hidden dark:bg-neutral-950/80 dark:text-neutral-300 dark:hover:bg-neutral-800"
+    >
+      <Menu className="size-5" />
+    </button>
+
+    {open && (
+      <div
+        aria-hidden
+        onClick={close}
+        className="fixed inset-0 z-30 bg-black/30 md:hidden"
+      />
+    )}
+
+    <aside
+      className={`fixed inset-y-0 left-0 z-40 flex h-dvh w-64 shrink-0 flex-col border-r border-neutral-200 bg-neutral-50 transition-transform md:static md:translate-x-0 dark:border-neutral-800 dark:bg-neutral-950 ${
+        open ? 'translate-x-0' : '-translate-x-full'
+      }`}
+    >
       <WorkspaceSwitcher
         workspace={workspace}
         workspaces={workspaces}
@@ -60,7 +101,7 @@ export function Sidebar({ workspace, workspaces, nodes, user, unread }: Props) {
       </div>
 
       <nav className="flex-1 overflow-y-auto px-2 pb-2">
-        <PageTree workspaceId={workspace.id} nodes={nodes} />
+        <PageTree workspaceId={workspace.id} nodes={nodes} canMoveToRoot={workspace.role !== 'guest'} />
       </nav>
 
       <div className="border-t border-neutral-200 p-2 dark:border-neutral-800">
@@ -101,5 +142,6 @@ export function Sidebar({ workspace, workspaces, nodes, user, unread }: Props) {
         </Link>
       </div>
     </aside>
+    </>
   )
 }

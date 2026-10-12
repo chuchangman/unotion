@@ -112,9 +112,26 @@ async function fanOut(
     .from(comments)
     .where(eq(comments.threadId, input.threadId))
 
-  const others = participants
-    .map((p) => p.authorId)
-    .filter((id) => !mentioned.includes(id))
+  /**
+   * 알림에는 페이지 제목과 코멘트 발췌가 실린다. 멤버이기만 하면 보내던 걸, 그 페이지를
+   * **읽을 수 있는 사람**으로 좁힌다 — 공유받지 않은 게스트를 멘션하면 볼 수 없는 문서의
+   * 제목과 내용이 알림으로 새고 있었다. 권한이 회수된 옛 참여자도 여기서 빠진다.
+   */
+  const readable = async (ids: string[]) => {
+    const checked = await Promise.all(ids.map(async (id) => {
+      try {
+        return (await resolvePageAccess(id, input.pageId)) ? id : null
+      } catch {
+        return null
+      }
+    }))
+    return checked.filter((id): id is string => id !== null)
+  }
+  mentioned = await readable(mentioned)
+
+  const others = await readable(
+    participants.map((p) => p.authorId).filter((id) => !mentioned.includes(id)),
+  )
 
   await Promise.all([
     Notifications.notify(actor, {

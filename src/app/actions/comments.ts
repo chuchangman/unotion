@@ -5,38 +5,21 @@
  *
  * revalidatePath 를 쓰지 않는다. 코멘트는 사이드바 트리나 라우트 데이터를
  * 바꾸지 않으므로 라우트를 다시 그릴 이유가 없다. 패널이 응답값으로 갱신한다.
+ *
+ * 목록과 멘션 후보는 조회라 라우트다 — app/api/pages/[pageId]/comments,
+ * app/api/workspaces/[workspaceId]/members
  */
+import { z } from 'zod'
 import { requireActor } from '@/lib/auth'
 import * as Comments from '@/lib/core/comments'
-import * as Workspaces from '@/lib/core/workspaces'
-import { DomainError } from '@/lib/core/errors'
-import type { CommentRow, CommentThread } from '@/lib/core/comments'
+import type { CommentRow } from '@/lib/core/comments'
+import { run, type ActionResult } from '@/lib/action'
+import { Id, parse } from '@/lib/validation'
 
-export type ActionResult<T> =
-  | { ok: true; data: T }
-  | { ok: false; code: string; message: string }
-
-async function run<T>(fn: () => Promise<T>): Promise<ActionResult<T>> {
-  try {
-    return { ok: true, data: await fn() }
-  } catch (err) {
-    if (err instanceof DomainError) {
-      return { ok: false, code: err.code, message: err.message }
-    }
-    console.error('[action:comments] 예상치 못한 오류', err)
-    return { ok: false, code: 'internal', message: '알 수 없는 오류가 발생했습니다' }
-  }
-}
-
-export async function listThreads(
-  pageId: string,
-  includeResolved = false,
-): Promise<ActionResult<CommentThread[]>> {
-  return run(async () => {
-    const actor = await requireActor()
-    return Comments.listThreads(actor, pageId, { includeResolved })
-  })
-}
+/** 길이 상한은 core 가 본다 (comments.ts 의 MAX_BODY). 여기서는 문자열인지만 */
+const Body = z.string()
+/** 멘션은 워크스페이스 멤버로 core 가 다시 거른다 */
+const Mentions = z.array(Id).max(50, '한 번에 50명까지 멘션할 수 있습니다')
 
 export async function createThread(
   pageId: string,
@@ -44,9 +27,16 @@ export async function createThread(
   mentions: string[] = [],
   blockId?: string | null,
 ): Promise<ActionResult<CommentRow>> {
-  return run(async () => {
+  return run('comments', async () => {
+    const id = parse(Id, pageId)
+    const input = {
+      body: parse(Body, body),
+      mentions: parse(Mentions, mentions),
+      // BlockNote 블록 id. 인라인 코멘트용이다
+      blockId: parse(z.string().max(100).nullable().optional(), blockId),
+    }
     const actor = await requireActor()
-    return Comments.createThread(actor, pageId, { body, blockId, mentions })
+    return Comments.createThread(actor, id, input)
   })
 }
 
@@ -55,23 +45,10 @@ export async function replyToThread(
   body: string,
   mentions: string[] = [],
 ): Promise<ActionResult<CommentRow>> {
-  return run(async () => {
+  return run('comments', async () => {
+    const id = parse(Id, threadId)
     const actor = await requireActor()
-    return Comments.reply(actor, threadId, body, mentions)
-  })
-}
-
-/**
- * 멘션할 수 있는 사람들. 코멘트 입력창에서 @ 를 눌렀을 때만 부른다 —
- * 페이지 로드에 왕복을 하나 더 붙이지 않으려고 지연 조회한다.
- */
-export async function listMentionables(
-  workspaceId: string,
-): Promise<ActionResult<Array<{ id: string; displayName: string; email: string }>>> {
-  return run(async () => {
-    const actor = await requireActor()
-    const members = await Workspaces.listMembers(actor, workspaceId)
-    return members.map((m) => ({ id: m.id, displayName: m.displayName, email: m.email }))
+    return Comments.reply(actor, id, parse(Body, body), parse(Mentions, mentions))
   })
 }
 
@@ -79,17 +56,19 @@ export async function resolveThread(
   threadId: string,
   resolved: boolean,
 ): Promise<ActionResult<null>> {
-  return run(async () => {
+  return run('comments', async () => {
+    const id = parse(Id, threadId)
     const actor = await requireActor()
-    await Comments.resolveThread(actor, threadId, resolved)
+    await Comments.resolveThread(actor, id, parse(z.boolean(), resolved))
     return null
   })
 }
 
 export async function deleteComment(commentId: string): Promise<ActionResult<null>> {
-  return run(async () => {
+  return run('comments', async () => {
+    const id = parse(Id, commentId)
     const actor = await requireActor()
-    await Comments.deleteComment(actor, commentId)
+    await Comments.deleteComment(actor, id)
     return null
   })
 }

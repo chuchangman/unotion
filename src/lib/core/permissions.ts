@@ -8,7 +8,7 @@
  * 조상은 pages.path 문자열('/rootId/childId/')에서 파싱한다 — 추가 쿼리가 없다.
  */
 import { cache } from 'react'
-import { and, eq, inArray } from 'drizzle-orm'
+import { and, eq, inArray, sql, type AnyColumn, type SQL } from 'drizzle-orm'
 import { db } from './db'
 import { pages, pagePermissions, workspaceMembers } from './schema'
 import { Forbidden, NotFound } from './errors'
@@ -94,24 +94,53 @@ export function ancestorIdsFromPath(path: string): string[] {
   return path.split('/').filter(Boolean).reverse()
 }
 
+/** 바깥 질의의 페이지 컬럼. drizzle 컬럼 객체거나 별칭을 쓴 생 SQL 조각 */
+type PageCols = { id: SQL | AnyColumn; path: SQL | AnyColumn }
+
+/**
+ * "게스트가 읽을 수 있는 페이지" 를 SQL 조건 하나로.
+ *
+ * resolvePageAccess 와 같은 규칙이다 — 페이지 자신이나 조상에 이 사람의 명시 권한이
+ * 있으면 읽는다. 조상은 path('/루트/…/부모/') 에 들어 있으므로 LIKE 한 번이면 된다
+ * (id 는 UUID 라 LIKE 의 특수문자 % _ 가 없다).
+ *
+ * cols 는 바깥 질의의 페이지 컬럼이다. drizzle 질의면 pages.id / pages.path 를,
+ * 별칭을 쓴 생 SQL 이면 sql.raw('p.id') 처럼 넘긴다.
+ *
+ * ★ 목록·검색은 **게스트일 때** 이 조건을 붙인다 (pages.ts 의 트리·검색·최근·휴지통, page-content.ts 의 백링크)
+ *   예전에는 목록·검색이 멤버인지만 봐서, "명시적으로 공유된 페이지만" 보는 게스트에게도
+ *   모든 제목과 본문 발췌(검색 결과 160자)가 나갔다 — MCP 로도. 페이지 하나를 여는 경로만
+ *   resolvePageAccess 를 지났다. 멤버 이상은 모든 페이지를 읽을 수 있으므로(명시 권한은
+ *   등급만 바꾸고 "안 보임" 은 없다) 조건을 붙이지 않는다.
+ */
+export function readableByGuest(userId: string, cols: PageCols): SQL {
+  return sql`EXISTS (
+    SELECT 1 FROM page_permissions pp
+     WHERE pp.user_id = ${userId}
+       AND (pp.page_id = ${cols.id} OR ${cols.path} LIKE '%/' || pp.page_id::text || '/%')
+  )`
+}
+
 /**
  * 유효 권한을 계산한다. 접근 불가면 null.
  * 페이지가 없으면 NotFound (존재 여부 자체는 숨기지 않는다 — 내부 팀 도구이므로).
+ *
+ * ★ 요청 단위 캐시 — getWorkspaceRole 과 같은 이유다.
+ *   문서 화면 하나가 권한을 여러 번 묻는다: 본문 머리(getPageMeta), 데이터베이스인지,
+ *   코멘트 수, 백링크가 각자 assertCanRead 를 부른다. 예전에는 그때마다 페이지 행과 명시
+ *   권한을 다시 읽었다(문서 하나에 같은 쿼리 쌍이 네 번). 인자가 문자열 둘이라 캐시 키로 맞다.
+ *   한 요청 안에서 권한을 바꾸고 다시 묻는 코드는 없다 — 바꾸는 액션은 revalidate 뒤
+ *   **다음** 요청에서 새로 읽는다.
  */
-export async function resolvePageAccess(
+export const resolvePageAccess = cache(async function resolvePageAccess(
   userId: string,
   pageId: string,
-  /**
-   * 호출자가 이미 그 행을 가지고 있으면 넘긴다 — 같은 요청에서 pages 를
-   * 두 번 조회하지 않기 위한 것이다 (페이지 뷰가 그런 경우였다).
-   */
-  known?: { id: string; workspaceId: string; path: string },
 ): Promise<{ level: PermissionLevel; workspaceId: string; role: WorkspaceRole | null } | null> {
-  const page = known ?? (await db
+  const [page] = await db
     .select({ id: pages.id, workspaceId: pages.workspaceId, path: pages.path })
     .from(pages)
     .where(eq(pages.id, pageId))
-    .limit(1))[0]
+    .limit(1)
   if (!page) throw new NotFound('Page')
 
   const chain = [page.id, ...ancestorIdsFromPath(page.path)]
@@ -141,7 +170,7 @@ export async function resolvePageAccess(
   const level = ROLE_DEFAULT[role]
   if (!level) return null
   return { level, workspaceId: page.workspaceId, role }
-}
+})
 
 async function assertLevel(userId: string, pageId: string, min: PermissionLevel) {
   const access = await resolvePageAccess(userId, pageId)

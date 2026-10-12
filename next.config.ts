@@ -22,19 +22,6 @@ const nextConfig: NextConfig = {
     'y-prosemirror',
   ],
   /**
-   * BlockNote 의 서버 변환기는 React 의 createContext 를 쓴다.
-   * Next 가 라우트 핸들러를 번들할 때 'react-server' 조건으로 해석하면
-   * createContext 가 없어서 "UA.createContext is not a function" 으로 죽는다.
-   * 외부 의존성으로 빼면 Node 가 기본 조건으로 resolve 해서 정상 동작한다.
-   */
-  /**
-   * BlockNote 서버 변환기를 external 로 빼면 Vercel 람다에서
-   * Turbopack 의 external 로더가 jsdom 체인의 CJS->ESM require 를 못 다뤄
-   * ERR_REQUIRE_ESM 으로 라우트 전체가 500 이 된다.
-   * 그래서 번들시키고, 빌드 타임 createContext 오류는
-   * lib/core/markdown.ts 의 지연 import 로 회피한다.
-   */
-  /**
    * 동적 라우트의 클라이언트 캐시(Router Cache) 수명.
    *
    * Next 15 부터 dynamic 기본값이 0 이라 **뒤로가기조차 매번 서버 왕복**이었다.

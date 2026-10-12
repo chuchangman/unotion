@@ -1,9 +1,11 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect } from 'react'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
+import { useQuery } from '@tanstack/react-query'
 import { Maximize2, X } from 'lucide-react'
-import { getPagePreview } from '@/app/actions/pages'
+import { getJson } from '@/lib/api/client'
+import { qk } from '@/lib/query-keys'
 import { PageHeader } from './PageHeader'
 import { EditorLoader } from './EditorLoader'
 
@@ -68,18 +70,14 @@ function PeekBody({
   onClose: () => void
 }) {
   const router = useRouter()
-  const [page, setPage] = useState<Preview | null>(null)
-  const [error, setError] = useState('')
-
-  useEffect(() => {
-    let cancelled = false
-    void getPagePreview(peekId).then((res) => {
-      if (cancelled) return
-      if (res.ok) setPage(res.data)
-      else setError(res.message)
-    })
-    return () => { cancelled = true }
-  }, [peekId])
+  // 같은 문서를 다시 열면 캐시로 즉시 그린다
+  const preview = useQuery({
+    queryKey: qk.preview(peekId),
+    queryFn: () => getJson<Preview>(`/api/pages/${peekId}/preview`),
+    retry: false, // 권한 없음·없는 문서는 다시 물어도 같다
+  })
+  const page = preview.data ?? null
+  const error = preview.error?.message ?? ''
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -146,7 +144,6 @@ function PeekBody({
               <EditorLoader
                 pageId={page.id}
                 workspaceId={workspaceId}
-                title={page.title}
                 user={user}
                 canEdit={page.canEdit}
               />

@@ -10,11 +10,17 @@
  * 아직 화면이 없다. 여기서 만드는 스레드는 block_id 가 null 이다.
  */
 import { useState, useTransition } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AtSign, Check, MessageSquare, RotateCcw, Trash2, X } from 'lucide-react'
 import * as Actions from '@/app/actions/comments'
 import type { CommentThread } from '@/lib/core/comments'
+import { getJson, jsonify, type Jsonified } from '@/lib/api/client'
+import { qk } from '@/lib/query-keys'
+import { useWorkspaceSignal } from '@/components/live/WorkspaceLive'
 
 type Member = { id: string; displayName: string; email: string }
+/** 라우트(JSON)로 받은 스레드 — 날짜가 문자열이다 */
+type Thread = Jsonified<CommentThread>
 
 export function CommentPanel({
   pageId, workspaceId, canComment, currentUserId, openCount,
@@ -25,82 +31,105 @@ export function CommentPanel({
   currentUserId: string
   openCount: number
 }) {
+  const queryClient = useQueryClient()
+  const emit = useWorkspaceSignal()
   const [open, setOpen] = useState(false)
-  const [threads, setThreads] = useState<CommentThread[] | null>(null)
   const [showResolved, setShowResolved] = useState(false)
   const [draft, setDraft] = useState('')
   const [mentions, setMentions] = useState<string[]>([])
-  const [members, setMembers] = useState<Member[] | null>(null)
-  const [error, setError] = useState('')
+  const [wantMembers, setWantMembers] = useState(false)
+  const [actionError, setActionError] = useState('')
   const [, start] = useTransition()
+
+  /**
+   * 스레드 목록. 패널이 열려 있을 때만 읽는다.
+   * 다른 사람이 코멘트를 달면 실시간 신호가 이 키를 무효화해 다시 읽는다 (components/live).
+   */
+  const key = qk.comments(pageId, showResolved)
+  const threadsQuery = useQuery({
+    queryKey: key,
+    queryFn: () =>
+      getJson<{ threads: Thread[] }>(
+        `/api/pages/${pageId}/comments${showResolved ? '?resolved=1' : ''}`,
+      ).then((r) => r.threads),
+    enabled: open,
+  })
+  const threads = threadsQuery.data ?? null
 
   /**
    * 멘션 후보는 @ 를 눌렀을 때 한 번만 불러온다.
    * 패널을 열 때마다 부르면 코멘트를 안 달아도 왕복이 하나 생긴다.
    */
-  const loadMembers = () => {
-    if (members) return
-    start(async () => {
-      const res = await Actions.listMentionables(workspaceId)
-      if (res.ok) setMembers(res.data)
-      else setError(res.message)
-    })
-  }
+  const membersQuery = useQuery({
+    queryKey: qk.members(workspaceId),
+    queryFn: () =>
+      getJson<{ members: Member[] }>(`/api/workspaces/${workspaceId}/members`).then((r) => r.members),
+    enabled: wantMembers,
+    staleTime: 5 * 60_000,
+  })
+  const members = membersQuery.data ?? null
+  const loadMembers = () => setWantMembers(true)
 
-  const load = (includeResolved: boolean) =>
-    start(async () => {
-      const res = await Actions.listThreads(pageId, includeResolved)
-      if (res.ok) setThreads(res.data)
-      else setError(res.message)
+  const error = actionError || threadsQuery.error?.message || membersQuery.error?.message || ''
+
+  /**
+   * 쓰기 결과를 지금 보이는 목록에 바로 반영한다. 반대쪽 보기(해결됨 포함/미포함)는
+   * 다음에 전환할 때 다시 읽게 "오래됨" 표시만 해 둔다.
+   */
+  const updateThreads = (fn: (prev: Thread[]) => Thread[]) => {
+    queryClient.setQueryData<Thread[]>(key, (prev) => fn(prev ?? []))
+    void queryClient.invalidateQueries({
+      queryKey: qk.comments(pageId, !showResolved),
+      refetchType: 'none',
     })
+    // 이 문서를 보고 있는 다른 사람의 패널과 코멘트 수도
+    emit({ kind: 'comments', pageId })
+  }
 
   const openPanel = () => {
     setOpen(true)
-    setError('')
-    load(showResolved)
+    setActionError('')
   }
 
-  const toggleResolved = () => {
-    const next = !showResolved
-    setShowResolved(next)
-    setThreads(null)
-    load(next)
-  }
+  const toggleResolved = () => setShowResolved((v) => !v)
 
   const addThread = () => {
     const body = draft.trim()
     if (!body) return
     start(async () => {
       const res = await Actions.createThread(pageId, body, mentions)
-      if (!res.ok) { setError(res.message); return }
+      if (!res.ok) { setActionError(res.message); return }
       setDraft('')
       setMentions([])
-      setThreads((prev) => [
-        ...(prev ?? []),
-        { id: res.data.threadId, blockId: null, resolvedAt: null, comments: [res.data] },
+      const comment = jsonify(res.data)
+      updateThreads((prev) => [
+        ...prev,
+        { id: comment.threadId, blockId: null, resolvedAt: null, comments: [comment] },
       ])
+      emit({ kind: 'notifications' }) // 멘션·참여자 알림
     })
   }
 
   const addReply = (threadId: string, body: string, replyMentions: string[]) =>
     start(async () => {
       const res = await Actions.replyToThread(threadId, body, replyMentions)
-      if (!res.ok) { setError(res.message); return }
-      setThreads((prev) =>
-        (prev ?? []).map((t) =>
-          t.id === threadId ? { ...t, comments: [...t.comments, res.data] } : t,
-        ),
+      if (!res.ok) { setActionError(res.message); return }
+      const comment = jsonify(res.data)
+      updateThreads((prev) =>
+        prev.map((t) => (t.id === threadId ? { ...t, comments: [...t.comments, comment] } : t)),
       )
+      emit({ kind: 'notifications' })
     })
 
   const setResolved = (threadId: string, resolved: boolean) =>
     start(async () => {
       const res = await Actions.resolveThread(threadId, resolved)
-      if (!res.ok) { setError(res.message); return }
+      if (!res.ok) { setActionError(res.message); return }
       // 미해결만 보는 중이면 해결된 스레드는 목록에서 빠진다
-      setThreads((prev) =>
-        (prev ?? [])
-          .map((t) => (t.id === threadId ? { ...t, resolvedAt: resolved ? new Date() : null } : t))
+      const at = resolved ? new Date().toISOString() : null
+      updateThreads((prev) =>
+        prev
+          .map((t) => (t.id === threadId ? { ...t, resolvedAt: at } : t))
           .filter((t) => showResolved || !t.resolvedAt),
       )
     })
@@ -108,9 +137,9 @@ export function CommentPanel({
   const remove = (commentId: string, threadId: string, isRoot: boolean) =>
     start(async () => {
       const res = await Actions.deleteComment(commentId)
-      if (!res.ok) { setError(res.message); return }
-      setThreads((prev) =>
-        (prev ?? [])
+      if (!res.ok) { setActionError(res.message); return }
+      updateThreads((prev) =>
+        prev
           .map((t) =>
             t.id === threadId
               ? { ...t, comments: t.comments.filter((c) => c.id !== commentId) }
@@ -185,7 +214,7 @@ export function CommentPanel({
               ) : (
                 <ul className="space-y-4">
                   {visible.map((thread) => (
-                    <Thread
+                    <ThreadItem
                       key={thread.id}
                       thread={thread}
                       canComment={canComment}
@@ -292,10 +321,10 @@ function MentionPicker({
   )
 }
 
-function Thread({
+function ThreadItem({
   thread, canComment, currentUserId, members, onLoadMembers, onReply, onResolve, onDelete,
 }: {
-  thread: CommentThread
+  thread: Thread
   canComment: boolean
   currentUserId: string
   members: Member[] | null

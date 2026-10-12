@@ -10,6 +10,7 @@ import {
 } from '@/app/actions/workspaces'
 import type { MyWorkspace } from '@/lib/core/workspaces'
 import type { WorkspaceRole } from '@/lib/core/permissions'
+import { useWorkspaceSignal } from '@/components/live/WorkspaceLive'
 
 type Props = {
   /** 지금 보고 있는 룸 */
@@ -31,6 +32,7 @@ type Props = {
 export function WorkspaceSwitcher({ workspace, workspaces, userName }: Props) {
   const router = useRouter()
   const [pending, start] = useTransition()
+  const emit = useWorkspaceSignal()
   const [open, setOpen] = useState(false)
   /** idle | rename(제목 자리 입력) | create(드롭다운 안 입력) */
   const [mode, setMode] = useState<'idle' | 'rename' | 'create'>('idle')
@@ -102,6 +104,7 @@ export function WorkspaceSwitcher({ workspace, workspaces, userName }: Props) {
       setMode('idle')
       // 서버가 거절하면(권한 없음 등) 이유를 보여준다 — 화면의 이름은 되돌아간다
       if (!res.ok) alert(res.message)
+      else emit({ kind: 'tree' }) // 다른 사람의 사이드바·탭 이름도
     })
   }
 

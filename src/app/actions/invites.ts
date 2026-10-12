@@ -1,22 +1,12 @@
 'use server'
 
 import { revalidatePath } from 'next/cache'
+import { z } from 'zod'
 import { createClient } from '@/lib/supabase/server'
 import { requireActor, requireSessionContext } from '@/lib/auth'
 import * as Invites from '@/lib/core/invites'
-import { DomainError } from '@/lib/core/errors'
-
-export type Result<T> = { ok: true; data: T } | { ok: false; message: string }
-
-async function run<T>(fn: () => Promise<T>): Promise<Result<T>> {
-  try {
-    return { ok: true, data: await fn() }
-  } catch (err) {
-    if (err instanceof DomainError) return { ok: false, message: err.message }
-    console.error('[action:invites]', err)
-    return { ok: false, message: '알 수 없는 오류가 발생했습니다' }
-  }
-}
+import { run, type ActionResult } from '@/lib/action'
+import { Id, parse } from '@/lib/validation'
 
 const siteUrl = () => process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000'
 
@@ -33,13 +23,16 @@ const siteUrl = () => process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000
 export async function inviteMember(
   email: string,
   role: 'admin' | 'member' | 'guest' = 'member',
-): Promise<Result<{ inviteUrl: string; emailed: boolean }>> {
-  return run(async () => {
+): Promise<ActionResult<{ inviteUrl: string; emailed: boolean }>> {
+  return run('invites', async () => {
+    // 이메일 형식은 core 가 본다 (invites.ts 의 createInvite)
+    const address = parse(z.string().max(320, '이메일이 너무 깁니다'), email)
+    const validRole = parse(z.enum(['admin', 'member', 'guest']), role)
     const { actor, workspace } = await requireSessionContext()
     const invite = await Invites.createInvite(actor, {
       workspaceId: workspace.id,
-      email,
-      role,
+      email: address,
+      role: validRole,
     })
 
     const inviteUrl = `${siteUrl()}/invite/${invite.token}`
@@ -63,19 +56,21 @@ export async function inviteMember(
   })
 }
 
-export async function revokeInvite(inviteId: string): Promise<Result<null>> {
-  return run(async () => {
+export async function revokeInvite(inviteId: string): Promise<ActionResult<null>> {
+  return run('invites', async () => {
+    const id = parse(Id, inviteId)
     const actor = await requireActor()
-    await Invites.revokeInvite(actor, inviteId)
+    await Invites.revokeInvite(actor, id)
     revalidatePath('/settings/members')
     return null
   })
 }
 
-export async function acceptInvite(token: string): Promise<Result<null>> {
-  return run(async () => {
+export async function acceptInvite(token: string): Promise<ActionResult<null>> {
+  return run('invites', async () => {
+    const valid = parse(z.string().min(1).max(200), token)
     const actor = await requireActor()
-    await Invites.acceptInvite(actor, token)
+    await Invites.acceptInvite(actor, valid)
     revalidatePath('/', 'layout')
     return null
   })

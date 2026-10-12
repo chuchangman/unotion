@@ -3,7 +3,7 @@ import { generateKeyBetween } from 'fractional-indexing'
 import { db } from './db'
 import { pagePermissions, pages, profiles, workspaceMembers, workspaces } from './schema'
 import { Forbidden, InvalidInput, NotFound } from './errors'
-import { assertWorkspaceAdmin, assertWorkspaceMember } from './permissions'
+import { assertWorkspaceAdmin, assertWorkspaceMember, readableByGuest } from './permissions'
 import * as audit from './audit'
 import type { Actor } from './actor'
 import type { WorkspaceRole } from './permissions'
@@ -264,21 +264,26 @@ export async function listMembers(actor: Actor, workspaceId: string) {
 }
 
 /**
- * 워크스페이스의 첫 최상위 페이지 id.
+ * 이 사람이 룸에 들어왔을 때 처음 열 페이지 id.
  * 로그인 직후 "/" 를 거치지 않고 바로 그 페이지로 보내기 위한 것이다
  * ("/" 는 레이아웃(트리 조회)까지 렌더한 뒤 리다이렉트해서 왕복이 낭비된다).
+ *
+ * 게스트는 첫 최상위 페이지를 못 볼 수 있다 — 공유받은 것 중 가장 얕은 것으로 보낸다.
+ * (예전에는 게스트도 첫 최상위 페이지로 보내져서 로그인하자마자 "권한 없음" 을 봤다.)
  */
-export async function getFirstPageId(workspaceId: string): Promise<string | null> {
+export async function getFirstPageId(actor: Actor, workspaceId: string): Promise<string | null> {
+  const role = await assertWorkspaceMember(actor.userId, workspaceId)
+
   const [row] = await db
     .select({ id: pages.id })
     .from(pages)
     .where(and(
       eq(pages.workspaceId, workspaceId),
-      isNull(pages.parentId),
       eq(pages.isTrashed, false),
       isNull(pages.collectionId),
+      role === 'guest' ? readableByGuest(actor.userId, pages) : isNull(pages.parentId),
     ))
-    .orderBy(asc(pages.sortKey))
+    .orderBy(asc(sql`length(${pages.path})`), asc(pages.sortKey))
     .limit(1)
   return row?.id ?? null
 }

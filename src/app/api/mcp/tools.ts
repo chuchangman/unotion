@@ -13,6 +13,7 @@ import type { McpServer, ServerContext } from '@modelcontextprotocol/server'
 import { mcpActor, type Actor } from '@/lib/core/actor'
 import { DomainError } from '@/lib/core/errors'
 import * as Pages from '@/lib/core/pages'
+import * as Content from '@/lib/core/page-content'
 import * as Workspaces from '@/lib/core/workspaces'
 import * as Md from '@/lib/core/markdown'
 
@@ -43,6 +44,21 @@ async function workspaceOf(actor: Actor) {
   const list = await Workspaces.getMyWorkspaces(actor.userId)
   if (!list.length) throw new DomainError('참여한 워크스페이스가 없습니다', 'not_found')
   return list[0]
+}
+
+/**
+ * 본문을 병합 저장하고, 때가 됐으면 저장 **직전** 상태를 버전으로 남긴다 — 웹 자동저장과
+ * 같은 규칙(마지막 버전이 10분보다 오래됐을 때)이다. 스냅샷이 실패해도 쓰기는 이미 끝났으므로
+ * 도구는 성공으로 답한다.
+ */
+async function saveWithVersion(actor: Actor, pageId: string, delta: Uint8Array, opts: { title?: string } = {}) {
+  const saved = await Content.applyYdocUpdate(actor, pageId, delta, opts)
+  if (!saved.snapshotDue) return
+  try {
+    await Content.recordVersionSnapshot(actor, pageId, saved.snapshotDue)
+  } catch (err) {
+    console.error('[mcp] 버전 스냅샷 실패', pageId, err)
+  }
 }
 
 const siteUrl = () => process.env.NEXT_PUBLIC_SITE_URL ?? ''
@@ -224,13 +240,9 @@ export function registerTools(server: McpServer) {
       })
 
       if (markdown?.trim()) {
+        // 갓 만든 빈 페이지라 남길 "직전" 이 없다
         const applied = await Md.applyMarkdown(null, markdown, 'replace')
-        await Pages.savePageContent(actor, page.id, {
-          ydoc: applied.ydoc,
-          contentJson: applied.blocks,
-          plainText: await Md.blocksToMarkdown(applied.blocks),
-          title,
-        })
+        await Content.applyYdocUpdate(actor, page.id, applied.delta)
       }
 
       return text(
@@ -276,12 +288,7 @@ export function registerTools(server: McpServer) {
       }
 
       const applied = await Md.applyMarkdown(page.ydoc, edited.markdown, 'replace')
-      await Pages.savePageContent(actor, page_id, {
-        ydoc: applied.ydoc,
-        contentJson: applied.blocks,
-        plainText: await Md.blocksToMarkdown(applied.blocks),
-        title: page.title,
-      })
+      await saveWithVersion(actor, page_id, applied.delta)
 
       return text(
         [
@@ -301,8 +308,8 @@ export function registerTools(server: McpServer) {
         '페이지 본문에 내용을 덧붙이거나 전체를 갈아끼운다. **일부만 고치려면 edit_page 를 쓸 것** — 여기서 replace 모드는 본문 전체를 다시 써야 하고, 그 과정에서 손대지 않으려던 부분까지 바뀔 수 있다.' +
         '- mode="append" (기본): 기존 내용 뒤에 덧붙인다. 회의록 추가 등 가장 안전하고 자주 쓰인다.\n' +
         '- mode="prepend": 앞에 붙인다.\n' +
-        '- mode="replace": 본문 전체를 갈아끼운다. 되돌릴 수 없으니 사용자가 명확히 요청했을 때만.\n' +
-        '누군가 그 페이지를 브라우저에서 열어둔 상태라면 새로고침해야 보인다.',
+        '- mode="replace": 본문 전체를 갈아끼운다. 직전 상태가 버전 기록에 남아 웹에서 되돌릴 수는 있지만, 사용자가 명확히 요청했을 때만 쓸 것.\n' +
+        '그 페이지를 브라우저에 열어 둔 사람에게는 그 탭으로 돌아오는 순간 반영된다.',
       inputSchema: {
         page_id: z.string().uuid().describe('페이지 UUID'),
         markdown: z.string().min(1).describe('추가하거나 교체할 마크다운'),
@@ -315,13 +322,13 @@ export function registerTools(server: McpServer) {
       const page = await Pages.getPage(actor, page_id)
       const writeMode = mode ?? 'append'
 
+      // 통째로 갈아끼우기 전에는 10분 규칙과 상관없이 지금 상태를 남긴다 — 되돌릴 길을 먼저 만든다
+      if (writeMode === 'replace' && page.ydoc && page.ydoc.byteLength > 0) {
+        await Content.snapshotVersion(actor, page_id)
+      }
       const applied = await Md.applyMarkdown(page.ydoc, markdown, writeMode)
-      await Pages.savePageContent(actor, page_id, {
-        ydoc: applied.ydoc,
-        contentJson: applied.blocks,
-        plainText: await Md.blocksToMarkdown(applied.blocks),
-        title: title ?? page.title,
-      })
+      // 제목은 넘어왔을 때만 바꾼다 — 읽어 둔 옛 제목을 다시 쓰면 그 사이의 이름 변경을 되돌린다
+      await saveWithVersion(actor, page_id, applied.delta, title !== undefined ? { title } : {})
 
       return text(
         `**${(title ?? page.title) || '제목 없음'}** 을 수정했습니다 (mode=${writeMode}).\n\n` +

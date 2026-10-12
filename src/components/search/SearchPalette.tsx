@@ -12,25 +12,33 @@
  */
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { CornerDownLeft, FileText, Search } from 'lucide-react'
-import { recentPages, searchPages } from '@/app/actions/pages'
+import { getJson } from '@/lib/api/client'
+import { qk } from '@/lib/query-keys'
 
 export const OPEN_SEARCH_EVENT = 'unotion:open-search'
 
 type Hit = { id: string; title: string; snippet?: string }
 
+/** 입력이 멈춘 뒤에만 값을 넘긴다 — 한 글자마다 검색을 쏘지 않게 */
+function useDebounced<T>(value: T, ms: number): T {
+  const [settled, setSettled] = useState(value)
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(value), ms)
+    return () => clearTimeout(timer)
+  }, [value, ms])
+  return settled
+}
+
 export function SearchPalette({ workspaceId }: { workspaceId: string }) {
   const router = useRouter()
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
-  const [results, setResults] = useState<Hit[]>([])
-  const [recent, setRecent] = useState<Hit[]>([])
-  const [loading, setLoading] = useState(false)
   const [active, setActive] = useState(0)
 
   const inputRef = useRef<HTMLInputElement>(null)
-  /** 늦게 도착한 옛 응답이 새 결과를 덮어쓰지 않게 하는 표식 */
-  const latestRequest = useRef(0)
+  const debounced = useDebounced(query.trim(), 150)
 
   // ── 열기 (⌘K / Ctrl+K, 그리고 사이드바 버튼)
 
@@ -61,40 +69,36 @@ export function SearchPalette({ workspaceId }: { workspaceId: string }) {
     if (open) inputRef.current?.focus()
   }, [open])
 
-  // 최근 문서
-  useEffect(() => {
-    if (!open) return
-    let cancelled = false
-    recentPages(workspaceId).then((res) => {
-      if (!cancelled && res.ok) setRecent(res.data)
-    })
-    return () => { cancelled = true }
-  }, [open, workspaceId])
-
-  // ── 검색 (디바운스 150ms)
-
-  useEffect(() => {
-    if (!open) return
-    const trimmed = query.trim()
-    if (!trimmed) return
-
-    const id = ++latestRequest.current
-    const timer = setTimeout(async () => {
-      setLoading(true)
-      const res = await searchPages(workspaceId, trimmed)
-      // 그 사이 더 최근 요청이 나갔으면 이 응답은 버린다
-      if (latestRequest.current !== id) return
-      setLoading(false)
-      if (res.ok) setResults(res.data)
-    }, 150)
-
-    return () => clearTimeout(timer)
-  }, [open, query, workspaceId])
+  /**
+   * 최근 문서와 검색 결과.
+   *
+   * 늦게 도착한 옛 응답이 새 결과를 덮어쓰는 문제, 같은 질의의 중복 요청, 다시 열 때의
+   * 빈 화면은 Query 가 키 단위로 처리한다 (예전에는 요청 번호 ref 로 손수 막았다).
+   * keepPreviousData: 한 글자 더 치는 동안 이전 결과를 그대로 둬서 목록이 깜빡이지 않는다.
+   */
+  const recent = useQuery({
+    queryKey: qk.recent(workspaceId),
+    queryFn: () =>
+      getJson<{ pages: Hit[] }>(`/api/workspaces/${workspaceId}/recent`).then((r) => r.pages),
+    enabled: open,
+    staleTime: 10_000,
+  })
+  const search = useQuery({
+    queryKey: qk.search(workspaceId, debounced),
+    queryFn: () =>
+      getJson<{ hits: Hit[] }>(
+        `/api/workspaces/${workspaceId}/search?q=${encodeURIComponent(debounced)}`,
+      ).then((r) => r.hits),
+    enabled: open && debounced.length > 0,
+    placeholderData: keepPreviousData,
+  })
 
   if (!open) return null
 
   const q = query.trim()
-  const shown = q ? results : recent
+  const shown = q ? (search.data ?? []) : (recent.data ?? [])
+  // 입력이 아직 디바운스 중이거나 요청이 날아가는 중
+  const loading = q.length > 0 && (debounced !== q || search.isFetching)
   const activeIdx = shown.length ? Math.min(active, shown.length - 1) : 0
 
   const close = () => {

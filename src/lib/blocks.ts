@@ -1,7 +1,10 @@
 /**
- * BlockNote 문서 <-> 평문 변환.
- * 검색/RAG/MCP 가 모두 쓰므로 클라이언트/서버 양쪽에서 임포트 가능해야 한다
- * (그래서 'use client' 도, DB 임포트도 없다).
+ * BlockNote 문서(블록 JSON) -> 평문 변환.
+ *
+ * 저장되는 검색용 평문은 이제 서버가 ydoc 에서 직접 뽑는다(lib/ydoc.ts).
+ * 이 파일은 에디터가 들고 있는 블록에서 바로 글이 필요할 때(회의 요약의 전문)와,
+ * 그 서버 추출이 같은 결과를 내는지 대조하는 기준(ydoc.test.ts)으로 남는다.
+ * 클라이언트/서버 양쪽에서 임포트하므로 'use client' 도, DB 임포트도 없다.
  */
 
 type BlockLike = { type?: string; content?: unknown; children?: unknown }
@@ -58,50 +61,13 @@ export function blocksToPlainText(blocks: unknown): string {
 const PAGE_HREF = /^\/p\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i
 
 /**
- * 본문이 가리키는 페이지 id 들. 백링크의 입력이다.
+ * 링크 주소가 우리 페이지(`/p/<id>`)를 가리키면 그 id. 아니면 null.
  *
  * 에디터는 페이지 링크를 **기본 link 마크**로 넣는다(`[📄 제목](/p/<id>)`).
- * 그래서 커스텀 노드를 찾을 필요 없이 href 만 보면 된다.
- *
- * 클라이언트에서 뽑아 저장 요청에 실어 보낸다 — 서버에서 ydoc 을 다시 파싱하면
- * 자동저장마다(2초) 문서 전체를 블록으로 푸는 비용이 붙는다.
+ * 그래서 커스텀 노드를 찾을 필요 없이 href 만 보면 된다. 백링크는 서버가 저장할 때
+ * ydoc 에서 이걸로 뽑는다 (lib/ydoc.ts 의 deriveFromYDoc).
  */
-export function blocksToPageLinks(blocks: unknown): string[] {
-  const found = new Set<string>()
-
-  /**
-   * 블록 트리를 **깊이 그대로** 훑는다.
-   *
-   * content 가 배열인 일반 블록만 보면 표 안의 링크를 통째로 놓친다 —
-   * 표는 content 가 배열이 아니라 { type: 'tableContent', rows: [{ cells: [...] }] }
-   * 객체다. 앞으로 블록 종류가 늘어도 안 깨지도록 형태를 가정하지 않고 훑는다.
-   */
-  const walk = (node: unknown, depth: number) => {
-    if (!node || depth > 20) return
-
-    if (Array.isArray(node)) {
-      for (const item of node) walk(item, depth + 1)
-      return
-    }
-    if (typeof node !== 'object') return
-
-    const obj = node as Record<string, unknown>
-    if (typeof obj.href === 'string') {
-      const m = PAGE_HREF.exec(obj.href)
-      if (m) found.add(m[1].toLowerCase())
-    }
-    for (const value of Object.values(obj)) {
-      if (value && typeof value === 'object') walk(value, depth + 1)
-    }
-  }
-
-  walk(blocks, 0)
-  return [...found]
-}
-
-/** 본문 첫 줄에서 제목 후보를 뽑는다 (제목이 비었을 때만 사용) */
-export function inferTitle(blocks: unknown): string {
-  const text = blocksToPlainText(blocks)
-  const first = text.split('\n').find((l) => l.trim())
-  return (first ?? '').slice(0, 120)
+export function pageIdFromHref(href: string): string | null {
+  const m = PAGE_HREF.exec(href)
+  return m ? m[1].toLowerCase() : null
 }

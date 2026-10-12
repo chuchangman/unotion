@@ -11,6 +11,7 @@ import { useState, useTransition } from 'react'
 import { RotateCcw, Trash2 } from 'lucide-react'
 import { deletePagePermanently, restorePage } from '@/app/actions/pages'
 import type { TrashedPage } from '@/lib/core/pages'
+import { useWorkspaceSignal } from '@/components/live/WorkspaceLive'
 
 export function TrashManager({
   items, canPurge,
@@ -22,14 +23,16 @@ export function TrashManager({
   const [error, setError] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
   const [, start] = useTransition()
+  const emit = useWorkspaceSignal()
 
   const restore = (page: TrashedPage) =>
     start(async () => {
       setBusy(page.id)
       const res = await restorePage(page.id)
       setBusy(null)
-      if (res.ok) setRows((prev) => prev.filter((r) => r.id !== page.id))
-      else setError(res.message)
+      if (!res.ok) { setError(res.message); return }
+      setRows((prev) => prev.filter((r) => r.id !== page.id))
+      emit({ kind: 'tree' }) // 되살린 페이지가 다른 사람의 사이드바에도 나타난다
     })
 
   const purge = (page: TrashedPage) => {

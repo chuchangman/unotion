@@ -7,36 +7,24 @@
  *   쿠키는 서버 액션이나 라우트 핸들러에서만 설정할 수 있어서, 렌더 경로
  *   (getSessionContext)는 읽기만 하고 바꾸는 건 전부 여기를 거친다.
  *
- * ★ redirect() 를 쓰지 않는다.
- *   redirect 는 특수 예외를 던지는데 아래 run() 의 catch 가 그걸 삼켜서
- *   이동이 조용히 죽는다. 그래서 갈 곳(pageId)을 돌려주고 이동은 클라이언트가 한다 —
- *   pages.ts 의 createPage 와 같은 방식이다.
+ * 룸을 바꾼 뒤의 이동은 클라이언트가 한다 — 갈 곳(pageId)을 돌려준다.
+ * (redirect 를 써도 이제 lib/action.ts 의 run() 이 삼키지 않지만, 클라이언트가
+ *  이동 전에 할 일(드롭다운 닫기 등)이 있어서 지금 방식이 낫다.)
  */
 import { cookies } from 'next/headers'
 import { revalidatePath } from 'next/cache'
+import { z } from 'zod'
 import { requireActor, ACTIVE_WORKSPACE_COOKIE } from '@/lib/auth'
 import * as Workspaces from '@/lib/core/workspaces'
 import { assertWorkspaceMember } from '@/lib/core/permissions'
-import { DomainError } from '@/lib/core/errors'
-
-export type ActionResult<T> =
-  | { ok: true; data: T }
-  | { ok: false; code: string; message: string }
-
-async function run<T>(fn: () => Promise<T>): Promise<ActionResult<T>> {
-  try {
-    return { ok: true, data: await fn() }
-  } catch (err) {
-    if (err instanceof DomainError) {
-      return { ok: false, code: err.code, message: err.message }
-    }
-    console.error('[action:workspaces] 예상치 못한 오류', err)
-    return { ok: false, code: 'internal', message: '알 수 없는 오류가 발생했습니다' }
-  }
-}
+import { run, type ActionResult } from '@/lib/action'
+import { Id, parse } from '@/lib/validation'
 
 /** 1년. 다음에 와도 마지막에 보던 룸이 열린다. */
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 365
+
+/** 룸 이름 규칙(빈 이름·60자)은 core 가 본다. 여기서는 문자열인지만 */
+const RoomName = z.string().max(200, '룸 이름이 너무 깁니다')
 
 async function setActiveWorkspace(workspaceId: string) {
   const store = await cookies()
@@ -58,13 +46,14 @@ async function setActiveWorkspace(workspaceId: string) {
 export async function switchProjectRoom(
   workspaceId: string,
 ): Promise<ActionResult<{ pageId: string | null }>> {
-  return run(async () => {
+  return run('workspaces', async () => {
+    const id = parse(Id, workspaceId)
     const actor = await requireActor()
     // 내 룸이 아닌 id 로는 못 바꾼다 (쿠키를 심기 전에 막는다)
-    await assertWorkspaceMember(actor.userId, workspaceId)
+    await assertWorkspaceMember(actor.userId, id)
 
-    await setActiveWorkspace(workspaceId)
-    const pageId = await Workspaces.getFirstPageId(workspaceId)
+    await setActiveWorkspace(id)
+    const pageId = await Workspaces.getFirstPageId(actor, id)
 
     /**
      * 사이드바 트리와 라우트 데이터가 통째로 바뀐다.
@@ -80,11 +69,12 @@ export async function switchProjectRoom(
 export async function createProjectRoom(
   name: string,
 ): Promise<ActionResult<{ workspaceId: string; pageId: string }>> {
-  return run(async () => {
+  return run('workspaces', async () => {
+    const valid = parse(RoomName, name)
     const actor = await requireActor()
     const { workspace, homePageId } = await Workspaces.createWorkspace(
       actor,
-      name.trim() || '새 프로젝트 룸',
+      valid.trim() || '새 프로젝트 룸',
     )
 
     // 만들었으면 바로 그 룸으로 들어간다
@@ -99,9 +89,10 @@ export async function renameProjectRoom(
   workspaceId: string,
   name: string,
 ): Promise<ActionResult<{ name: string }>> {
-  return run(async () => {
+  return run('workspaces', async () => {
+    const id = parse(Id, workspaceId)
     const actor = await requireActor()
-    const row = await Workspaces.renameWorkspace(actor, workspaceId, name)
+    const row = await Workspaces.renameWorkspace(actor, id, parse(RoomName, name))
 
     // 이름은 사이드바(레이아웃)에 있다
     revalidatePath('/', 'layout')
@@ -117,9 +108,11 @@ export async function removeProjectMember(
   workspaceId: string,
   userId: string,
 ): Promise<ActionResult<null>> {
-  return run(async () => {
+  return run('workspaces', async () => {
+    const id = parse(Id, workspaceId)
+    const user = parse(Id, userId)
     const actor = await requireActor()
-    await Workspaces.removeMember(actor, workspaceId, userId)
+    await Workspaces.removeMember(actor, id, user)
 
     /**
      * 멤버 목록은 설정 화면에 있고, 사이드바의 룸 목록도 멤버 수로 정렬된다.

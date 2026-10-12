@@ -12,6 +12,7 @@ import { getActor } from '@/lib/auth'
 import { transcribe } from '@/lib/core/transcribe'
 import { DomainError } from '@/lib/core/errors'
 import { MAX_AUDIO_BYTES } from '@/lib/transcribe'
+import { statusFor } from '@/lib/api/route'
 
 export const dynamic = 'force-dynamic'
 
@@ -84,19 +85,3 @@ export async function POST(request: Request) {
   }
 }
 
-/** DomainError 는 HTTP 를 모른다 (errors.ts). 매핑은 어댑터 몫이다. */
-function statusFor(code: string): number {
-  switch (code) {
-    case 'unauthorized': return 401
-    case 'forbidden': return 403
-    case 'not_found': return 404
-    case 'invalid_input': return 400
-    /**
-     * ★ 503 이어야 한다. 클라이언트가 이 코드를 보고 "되풀이해도 소용없음" 으로
-     *   판단해 전송을 멈추고 녹음만 이어간다 (MeetingRecorder 의 fatal).
-     *   500 으로 새면 구간마다 같은 오류를 두드리며 회의 내내 재시도한다.
-     */
-    case 'ai_unavailable': return 503
-    default: return 500
-  }
-}

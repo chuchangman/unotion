@@ -9,7 +9,7 @@
 import { useState, useTransition } from 'react'
 import { History, RotateCcw, X } from 'lucide-react'
 import { listVersions, restoreVersion } from '@/app/actions/pages'
-import type { PageVersionMeta } from '@/lib/core/pages'
+import type { PageVersionMeta } from '@/lib/core/page-content'
 
 export function VersionHistory({ pageId, canEdit }: { pageId: string; canEdit: boolean }) {
   const [open, setOpen] = useState(false)

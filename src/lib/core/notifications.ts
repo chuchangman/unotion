@@ -6,7 +6,7 @@
  * 이미 권한을 통과한 동작의 부수효과이기 때문이다.
  * 읽기 / 읽음 처리는 **본인 것만** 만질 수 있다 (user_id 조건이 항상 붙는다).
  */
-import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
+import { and, count, desc, eq, inArray, isNull } from 'drizzle-orm'
 import { db } from './db'
 import { notifications, pages, profiles } from './schema'
 import type { Actor } from './actor'
@@ -86,12 +86,13 @@ export async function listForUser(
     .limit(opts.limit ?? 30)
 }
 
+/** 안 읽은 수. 행을 가져와 세지 않고 DB 가 센다 — 모든 화면의 레이아웃이 부르는 쿼리다 */
 export async function countUnread(actor: Actor): Promise<number> {
-  const rows = await db
-    .select({ id: notifications.id })
+  const [row] = await db
+    .select({ n: count() })
     .from(notifications)
     .where(and(eq(notifications.userId, actor.userId), isNull(notifications.readAt)))
-  return rows.length
+  return row?.n ?? 0
 }
 
 export async function markRead(actor: Actor, ids: string[]): Promise<void> {

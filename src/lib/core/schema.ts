@@ -110,11 +110,17 @@ export const pages = pgTable('pages', {
 
 // ─────────────────────────────────────────── 데이터베이스 (컬렉션)
 
-export type PropertyType =
-  | 'title' | 'text' | 'number' | 'select' | 'multi_select' | 'status'
-  | 'date' | 'person' | 'files' | 'checkbox' | 'url' | 'email' | 'phone'
-  | 'created_time' | 'created_by' | 'last_edited_time' | 'last_edited_by'
-  | 'relation' | 'rollup' | 'formula'
+/**
+ * 값 목록을 배열로 두고 타입을 거기서 뽑는다 — 어댑터의 입력 검증(zod enum)이
+ * 같은 배열을 쓰므로 타입과 검증이 갈라지지 않는다.
+ */
+export const PROPERTY_TYPES = [
+  'title', 'text', 'number', 'select', 'multi_select', 'status',
+  'date', 'person', 'files', 'checkbox', 'url', 'email', 'phone',
+  'created_time', 'created_by', 'last_edited_time', 'last_edited_by',
+  'relation', 'rollup', 'formula',
+] as const
+export type PropertyType = (typeof PROPERTY_TYPES)[number]
 
 export type PropertyDef = {
   id: string
@@ -134,7 +140,8 @@ export const collections = pgTable('collections', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
-export type ViewType = 'table' | 'board' | 'calendar' | 'gallery' | 'list'
+export const VIEW_TYPES = ['table', 'board', 'calendar', 'gallery', 'list'] as const
+export type ViewType = (typeof VIEW_TYPES)[number]
 
 export const collectionViews = pgTable('collection_views', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -167,7 +174,8 @@ export const pageLinks = pgTable('page_links', {
 
 // ─────────────────────────────────────────── 권한 / 공유
 
-export type PermissionLevel = 'full' | 'edit' | 'comment' | 'read'
+export const PERMISSION_LEVELS = ['read', 'comment', 'edit', 'full'] as const
+export type PermissionLevel = (typeof PERMISSION_LEVELS)[number]
 
 /** 페이지에 걸린 명시적 권한. 없으면 워크스페이스 멤버십 + 상위 페이지 상속을 따른다. */
 export const pagePermissions = pgTable('page_permissions', {

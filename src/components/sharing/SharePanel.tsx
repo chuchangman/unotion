@@ -13,6 +13,7 @@ import * as Actions from '@/app/actions/sharing'
 import type { PermissionLevel } from '@/lib/core/schema'
 import type { SharingEntry } from '@/lib/core/sharing'
 import type { PublicShare } from '@/lib/core/public-share'
+import { useWorkspaceSignal } from '@/components/live/WorkspaceLive'
 
 const LABEL: Record<PermissionLevel, string> = {
   read: '읽기',
@@ -31,6 +32,7 @@ export function SharePanel({ pageId }: { pageId: string }) {
   const [copied, setCopied] = useState(false)
   const [error, setError] = useState('')
   const [, start] = useTransition()
+  const emit = useWorkspaceSignal()
 
   const openPanel = () =>
     start(async () => {
@@ -71,6 +73,8 @@ export function SharePanel({ pageId }: { pageId: string }) {
           : await Actions.setPagePermission(pageId, entry.userId, value as PermissionLevel)
 
       if (!res.ok) { setError(res.message); return }
+      // 권한이 바뀐 사람(특히 게스트)의 사이드바가 새로 그려져야 한다
+      emit({ kind: 'tree' })
 
       // 서버가 규칙의 주인이다 — 바꾼 뒤 다시 읽어 상속/기본값 표시를 맞춘다
       const fresh = await Actions.getPageSharing(pageId)

@@ -36,7 +36,7 @@ export async function GET(request: NextRequest) {
     if (!session?.workspace) {
       destination = '/pending'
     } else if (next === '/') {
-      const firstPage = await getFirstPageId(session.workspace.id)
+      const firstPage = await getFirstPageId(session.actor, session.workspace.id)
       if (firstPage) destination = `/p/${firstPage}`
     }
   } catch (err) {

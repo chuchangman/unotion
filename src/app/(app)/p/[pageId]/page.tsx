@@ -2,7 +2,8 @@ import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { Suspense, ViewTransition } from 'react'
 import { requireSessionContext } from '@/lib/auth'
-import { getPage, listBacklinks, resolvePageAccess } from '@/lib/core/pages'
+import { getPageMeta } from '@/lib/core/pages'
+import { listBacklinks } from '@/lib/core/page-content'
 import * as Collections from '@/lib/core/collections'
 import { listMembers } from '@/lib/core/workspaces'
 import { countOpenThreads } from '@/lib/core/comments'
@@ -17,6 +18,7 @@ import { ConvertToDatabase } from '@/components/collection/ConvertToDatabase'
 import { VersionHistory } from '@/components/editor/VersionHistory'
 import { CommentPanel } from '@/components/comments/CommentPanel'
 import { SharePanel } from '@/components/sharing/SharePanel'
+import { PresenceAvatars } from '@/components/live/PresenceAvatars'
 
 /**
  * 문서는 있는데 내가 못 보는 경우.
@@ -70,25 +72,28 @@ function NoAccess({ workspaceName, account }: { workspaceName: string; account: 
  */
 async function loadPageView(actor: Actor, workspaceId: string, pageId: string) {
   try {
-    const page = await getPage(actor, pageId)
+    /**
+     * 머리(제목·아이콘·권한)만 읽는다. 예전 getPage 는 `select *` 라 본문 ydoc 까지
+     * 끌어왔는데 이 화면은 그걸 쓰지 않는다 — 본문은 에디터가 ydoc 라우트로 따로 받는다.
+     * 권한도 여기서 계산하고, 아래 함수들의 권한 검사는 요청 캐시(resolvePageAccess)를 탄다.
+     */
+    const page = await getPageMeta(actor, pageId)
 
     /**
-     * 권한 계산과 "이 페이지가 데이터베이스인가" 조회를 **동시에** 한다.
+     * "데이터베이스인가"·코멘트 수·백링크는 **동시에** 묻는다.
      * 순차로 두면 모든 문서 페이지가 왕복을 하나씩 더 지불한다 —
      * 이 앱에서 가장 신경 쓴 게 그 왕복 수다 (README 성능 메모 참고).
      */
-    const [access, found, openComments, backlinks] = await Promise.all([
-      // 이미 가진 행을 넘겨 pages 재조회를 막는다
-      resolvePageAccess(actor.userId, pageId, page),
+    const [found, openComments, backlinks] = await Promise.all([
       Collections.getCollectionForPage(actor, pageId),
       countOpenThreads(actor, pageId),
       listBacklinks(actor, pageId),
     ])
-    const canEdit = access?.level === 'edit' || access?.level === 'full'
+    const canEdit = page.level === 'edit' || page.level === 'full'
     // read 보다 위면 코멘트를 쓸 수 있다 (read < comment < edit < full)
-    const canComment = access !== null && access.level !== 'read'
-    // 공유(권한 부여)는 full 만. 이미 계산한 access 를 재사용하므로 왕복이 늘지 않는다
-    const canManage = access?.level === 'full'
+    const canComment = page.level !== 'read'
+    // 공유(권한 부여)는 full 만
+    const canManage = page.level === 'full'
 
     /**
      * 멤버 목록은 데이터베이스 페이지에서만 필요하다(사람 속성 렌더용).
@@ -151,6 +156,8 @@ export default async function PageView({
   /** 문서든 데이터베이스든 같은 자리에 두는 도구 모음 */
   const toolbar = (
     <div className="flex items-center justify-end gap-1">
+      {/* 함께 열어 둔 사람 — 에디터가 알려 주므로 본문이 있는 문서에만 */}
+      {!isDatabase && <PresenceAvatars pageId={page.id} />}
       {canManage && <SharePanel pageId={page.id} />}
       <CommentPanel
         pageId={page.id}
@@ -214,11 +221,10 @@ export default async function PageView({
             key={page.id}
             pageId={page.id}
             workspaceId={workspace.id}
-            title={page.title}
             user={{ id: actor.userId, name: displayName }}
             canEdit={canEdit}
           />
-          {canEdit && !page.plainText.trim() && <ConvertToDatabase pageId={page.id} />}
+          {canEdit && page.isEmpty && <ConvertToDatabase pageId={page.id} />}
         </>
       )}
 

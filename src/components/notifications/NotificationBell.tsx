@@ -8,9 +8,14 @@
  */
 import { useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AtSign, Bell, MessageSquare, UserPlus } from 'lucide-react'
 import * as Actions from '@/app/actions/notifications'
 import type { NotificationRow } from '@/lib/core/notifications'
+import { getJson, type Jsonified } from '@/lib/api/client'
+import { qk } from '@/lib/query-keys'
+
+type Item = Jsonified<NotificationRow>
 
 const ICON = {
   mention: AtSign,
@@ -26,34 +31,52 @@ const VERB: Record<string, string> = {
 
 export function NotificationBell({ initialUnread }: { initialUnread: number }) {
   const router = useRouter()
+  const queryClient = useQueryClient()
   const [open, setOpen] = useState(false)
-  const [items, setItems] = useState<NotificationRow[] | null>(null)
-  const [unread, setUnread] = useState(initialUnread)
   const [, start] = useTransition()
 
-  const openPanel = () =>
-    start(async () => {
-      setOpen(true)
-      const res = await Actions.listNotifications()
-      if (res.ok) setItems(res.data)
-    })
+  /**
+   * 안 읽은 수는 레이아웃이 세어 준 값으로 시작한다(왕복 없음). 누가 나를 멘션했다는
+   * 실시간 신호가 오면 이 키만 무효화해 다시 센다 (components/live/WorkspaceLive.tsx).
+   */
+  const unreadQuery = useQuery({
+    queryKey: qk.unread,
+    queryFn: () => getJson<{ unread: number }>('/api/notifications?count=1').then((r) => r.unread),
+    initialData: initialUnread,
+  })
+  const unread = unreadQuery.data
+
+  // 목록은 종을 눌렀을 때만 불러온다
+  const itemsQuery = useQuery({
+    queryKey: qk.notifications,
+    queryFn: () => getJson<{ items: Item[] }>('/api/notifications').then((r) => r.items),
+    enabled: open,
+  })
+  const items = itemsQuery.data ?? null
+
+  const setItems = (fn: (prev: Item[]) => Item[]) =>
+    queryClient.setQueryData<Item[]>(qk.notifications, (prev) => fn(prev ?? []))
+  const setUnread = (fn: (prev: number) => number) =>
+    queryClient.setQueryData<number>(qk.unread, (prev) => fn(prev ?? 0))
+
+  const openPanel = () => setOpen(true)
 
   const readAll = () =>
     start(async () => {
       const res = await Actions.markAllRead()
       if (!res.ok) return
-      setUnread(0)
-      setItems((prev) => (prev ?? []).map((n) => ({ ...n, readAt: n.readAt ?? new Date() })))
+      const now = new Date().toISOString()
+      setUnread(() => 0)
+      setItems((prev) => prev.map((n) => ({ ...n, readAt: n.readAt ?? now })))
     })
 
-  const openItem = (n: NotificationRow) =>
+  const openItem = (n: Item) =>
     start(async () => {
       if (!n.readAt) {
         await Actions.markRead([n.id])
+        const now = new Date().toISOString()
         setUnread((u) => Math.max(0, u - 1))
-        setItems((prev) =>
-          (prev ?? []).map((x) => (x.id === n.id ? { ...x, readAt: new Date() } : x)),
-        )
+        setItems((prev) => prev.map((x) => (x.id === n.id ? { ...x, readAt: now } : x)))
       }
       setOpen(false)
       if (n.pageId) router.push(`/p/${n.pageId}`)

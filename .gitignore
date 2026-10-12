@@ -48,7 +48,5 @@ next-env.d.ts
 .drizzle-tmp/
 
 # .env* 로 전부 무시하되 예제는 커밋한다
+# (이 예외 아래에 .env* 를 다시 쓰면 예외가 도로 덮인다 — 예전에 그렇게 돼 있었다)
 !.env.example
-
-.vercel
-.env*

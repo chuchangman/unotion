@@ -9,18 +9,34 @@ import { autoAcceptInvite } from './core/invites'
 import { webActor } from './core/actor'
 import type { Actor } from './core/actor'
 
+/** 이 요청의 사용자 — JWT 클레임에서 필요한 것만 */
+type SessionUser = {
+  id: string
+  email: string | null
+  user_metadata: Record<string, unknown>
+}
+
 /**
  * Supabase 세션 -> Actor 로 변환하는 유일한 지점.
  * lib/core 는 Supabase 를 모른다 — 그래서 MCP 어댑터가 같은 core 를 재사용할 수 있다.
  *
- * ★ 성능: getUser() 는 Supabase Auth API 를 네트워크로 호출한다.
- *   한 요청 안에서 레이아웃·페이지·액션이 각자 부르면 그만큼 왕복이 늘어난다.
- *   React 의 cache() 로 요청 단위 1회로 묶는다.
+ * ★ 성능: getClaims() 로 **JWT 를 여기서 검증**한다.
+ *   예전 getUser() 는 Supabase Auth API 를 매번 네트워크로 불렀다 — proxy 에서 한 번, 여기서
+ *   또 한 번이라 문서 하나를 열면 네 번(RSC + 본문 요청), 자동저장마다 두 번이었다.
+ *   비대칭 서명 키 프로젝트면 공개키(JWKS)로 검증하고 키는 람다 안에 캐시된다. 대칭 키면
+ *   auth-js 가 getUser() 로 떨어진다 (proxy.ts 주석 참고).
+ *   그래도 한 요청 안에서 레이아웃·페이지·액션이 각자 부르므로 cache() 로 1회로 묶는다.
  */
-const currentUser = cache(async () => {
+const currentUser = cache(async (): Promise<SessionUser | null> => {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  return user
+  const { data, error } = await supabase.auth.getClaims()
+  const claims = data?.claims
+  if (error || !claims?.sub) return null
+  return {
+    id: claims.sub,
+    email: claims.email ?? null,
+    user_metadata: (claims.user_metadata ?? {}) as Record<string, unknown>,
+  }
 })
 
 export const getActor = cache(async (): Promise<Actor | null> => {
@@ -115,7 +131,13 @@ export async function requireSessionContext(): Promise<SessionContext> {
  * profiles 를 맞추고, 워크스페이스가 없으면 만든다.
  */
 export async function bootstrapAfterLogin() {
-  const user = await currentUser()
+  /**
+   * 여기만 getUser() 다 — Auth 서버에서 **지금** 사용자 정보를 받는다.
+   * 로그인 직후 한 번뿐이라 왕복 비용이 문제되지 않고, 프로필 이름·아바타를
+   * 토큰에 구워진 옛 값이 아니라 최신 값으로 맞추기 위해서다.
+   */
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
   if (!user) return null
 
   await ensureProfile({

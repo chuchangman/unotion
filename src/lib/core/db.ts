@@ -56,3 +56,6 @@ export const db = new Proxy({} as DrizzleDb, {
 
 export { schema }
 export type Db = DrizzleDb
+/** db.transaction 콜백이 받는 트랜잭션. 헬퍼가 db 와 트랜잭션을 둘 다 받게 할 때 쓴다 */
+export type Tx = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0]
+export type Executor = DrizzleDb | Tx

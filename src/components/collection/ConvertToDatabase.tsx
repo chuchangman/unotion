@@ -10,10 +10,12 @@ import { useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
 import { Table2 } from 'lucide-react'
 import { createCollection } from '@/app/actions/collections'
+import { useWorkspaceSignal } from '@/components/live/WorkspaceLive'
 
 export function ConvertToDatabase({ pageId }: { pageId: string }) {
   const router = useRouter()
   const [pending, start] = useTransition()
+  const emit = useWorkspaceSignal()
   const [error, setError] = useState('')
 
   return (
@@ -24,8 +26,9 @@ export function ConvertToDatabase({ pageId }: { pageId: string }) {
         onClick={() =>
           start(async () => {
             const res = await createCollection(pageId)
-            if (res.ok) router.refresh()
-            else setError(res.message)
+            if (!res.ok) { setError(res.message); return }
+            emit({ kind: 'tree' }) // 이 문서를 보고 있는 다른 사람의 화면도 표로 바뀐다
+            router.refresh()
           })
         }
         className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-sm text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 disabled:opacity-50 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"

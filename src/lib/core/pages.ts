@@ -1,14 +1,19 @@
 /**
- * 페이지 도메인. 웹 UI / REST / MCP 가 공유하는 유일한 진입점.
+ * 페이지 도메인 — 트리 · 검색 · 만들기 · 이동 · 휴지통. 웹 UI / REST / MCP 가 공유하는 진입점.
+ * 본문(ydoc) · 백링크 · 버전 기록은 page-content.ts 에 있다.
  *
  * 규칙: 모든 export 함수는 첫 인자로 Actor 를 받고, 가장 먼저 assert* 를 호출한다.
  */
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
 import { generateKeyBetween } from 'fractional-indexing'
-import { db } from './db'
-import { pageLinks, pages, pageVersions, profiles } from './schema'
-import { InvalidInput, NotFound } from './errors'
-import { assertCanEdit, assertCanManage, assertCanRead, assertWorkspaceMember, resolvePageAccess } from './permissions'
+import { db, type Executor } from './db'
+import { pages } from './schema'
+import type { PermissionLevel } from './schema'
+import { Forbidden, InvalidInput, NotFound } from './errors'
+import {
+  assertCanEdit, assertCanManage, assertCanRead, assertWorkspaceMember, readableByGuest, resolvePageAccess,
+} from './permissions'
+import { xactLock } from './locks'
 import * as audit from './audit'
 import type { Actor } from './actor'
 
@@ -28,15 +33,15 @@ function childPath(parent: { path: string; id: string } | null): string {
   return parent ? `${parent.path}${parent.id}/` : '/'
 }
 
-async function loadPage(pageId: string): Promise<PageRow> {
-  const [row] = await db.select().from(pages).where(eq(pages.id, pageId)).limit(1)
+async function loadPage(pageId: string, ex: Executor = db): Promise<PageRow> {
+  const [row] = await ex.select().from(pages).where(eq(pages.id, pageId)).limit(1)
   if (!row) throw new NotFound('Page')
   return row
 }
 
 /** 형제들 맨 끝에 놓을 sortKey */
-async function nextSortKey(workspaceId: string, parentId: string | null): Promise<string> {
-  const [last] = await db
+async function nextSortKey(workspaceId: string, parentId: string | null, ex: Executor = db): Promise<string> {
+  const [last] = await ex
     .select({ sortKey: pages.sortKey })
     .from(pages)
     .where(and(
@@ -56,9 +61,62 @@ export async function getPage(actor: Actor, pageId: string): Promise<PageRow> {
   return loadPage(pageId)
 }
 
+export type PageMeta = {
+  id: string
+  workspaceId: string
+  title: string
+  icon: PageRow['icon']
+  /** 본문이 비었는지 (평문 기준) — "데이터베이스로 바꾸기" 버튼을 띄울지 */
+  isEmpty: boolean
+  /** 이 사람의 유효 권한 */
+  level: PermissionLevel
+}
+
+/**
+ * 화면 머리에 필요한 것만. ydoc(본문 바이트)·평문을 싣지 않는다.
+ *
+ * getPage 는 `select *` 라 큰 문서면 수백 KB 짜리 ydoc 을 DB 에서 끌어오는데,
+ * 문서 화면(서버 컴포넌트)과 미리보기는 그걸 쓰지 않는다 — 본문은 에디터가 따로 받는다.
+ * 권한 계산 결과(level)도 같이 돌려줘서 호출부가 한 번 더 계산하지 않게 한다.
+ */
+export async function getPageMeta(actor: Actor, pageId: string): Promise<PageMeta> {
+  const access = await assertCanRead(actor.userId, pageId)
+  const [row] = await db
+    .select({
+      id: pages.id,
+      workspaceId: pages.workspaceId,
+      title: pages.title,
+      icon: pages.icon,
+      isEmpty: sql<boolean>`btrim(${pages.plainText}) = ''`,
+    })
+    .from(pages)
+    .where(eq(pages.id, pageId))
+    .limit(1)
+  if (!row) throw new NotFound('Page')
+  return { ...row, level: access.level }
+}
+
+/** 생 SQL 로 뽑은 트리 행 → TreeNode */
+function toTreeNodes(rows: unknown): TreeNode[] {
+  return (rows as Array<Record<string, unknown>>).map((r) => ({
+    id: r.id as string,
+    title: r.title as string,
+    icon: r.icon as PageRow['icon'],
+    parentId: (r.parent_id as string | null) ?? null,
+    sortKey: r.sort_key as string,
+    hasChildren: Boolean(r.has_children),
+  }))
+}
+
+/** 별칭 없이 FROM pages 로 쓴 생 SQL 에서 게스트 조건을 붙일 때 */
+const RAW_PAGES = { id: sql.raw('pages.id'), path: sql.raw('pages.path') }
+/** FROM pages p 로 쓴 생 SQL 에서 */
+const RAW_P = { id: sql.raw('p.id'), path: sql.raw('p.path') }
+
 /** 사이드바용 트리. 재귀 CTE 한 방. */
 export async function getPageTree(actor: Actor, workspaceId: string): Promise<TreeNode[]> {
-  await assertWorkspaceMember(actor.userId, workspaceId)
+  const role = await assertWorkspaceMember(actor.userId, workspaceId)
+  if (role === 'guest') return getGuestTree(actor.userId, workspaceId)
 
   const rows = await db.execute(sql`
     WITH RECURSIVE tree AS (
@@ -84,14 +142,34 @@ export async function getPageTree(actor: Actor, workspaceId: string): Promise<Tr
      ORDER BY t.depth, t.sort_key
   `)
 
-  return (rows as unknown as Array<Record<string, unknown>>).map((r) => ({
-    id: r.id as string,
-    title: r.title as string,
-    icon: r.icon as PageRow['icon'],
-    parentId: (r.parent_id as string | null) ?? null,
-    sortKey: r.sort_key as string,
-    hasChildren: Boolean(r.has_children),
-  }))
+  return toTreeNodes(rows)
+}
+
+/**
+ * 게스트의 트리 — 공유받은 페이지와 그 아래만.
+ *
+ * 공유받은 페이지의 조상은 볼 수 없어서 루트부터 내려가는 재귀로는 닿지 않는다.
+ * 읽을 수 있는 페이지를 한 번에 뽑고, 부모가 목록에 없으면 최상위로 올린다 —
+ * 사이드바는 parentId 로 묶어 그리므로 그걸로 충분하다. 얕은 것부터, 형제는 sortKey 순이다.
+ */
+async function getGuestTree(userId: string, workspaceId: string): Promise<TreeNode[]> {
+  const rows = await db.execute(sql`
+    SELECT p.id, p.title, p.icon, p.parent_id, p.sort_key,
+           EXISTS (
+             SELECT 1 FROM pages k
+              WHERE k.parent_id = p.id AND k.is_trashed = false AND k.collection_id IS NULL
+           ) AS has_children
+      FROM pages p
+     WHERE p.workspace_id = ${workspaceId}
+       AND p.is_trashed = false
+       AND p.collection_id IS NULL
+       AND ${readableByGuest(userId, RAW_P)}
+     ORDER BY length(p.path), p.sort_key
+  `)
+
+  const nodes = toTreeNodes(rows)
+  const visible = new Set(nodes.map((n) => n.id))
+  return nodes.map((n) => (n.parentId && !visible.has(n.parentId) ? { ...n, parentId: null } : n))
 }
 
 export async function searchPages(
@@ -100,8 +178,9 @@ export async function searchPages(
   query: string,
   limit = 20,
 ): Promise<Array<{ id: string; title: string; snippet: string }>> {
-  await assertWorkspaceMember(actor.userId, workspaceId)
+  const role = await assertWorkspaceMember(actor.userId, workspaceId)
   if (!query.trim()) return []
+  const onlyShared = role === 'guest' ? sql`AND ${readableByGuest(actor.userId, RAW_PAGES)}` : sql``
 
   // 한국어는 tsvector 토크나이저가 없어 부분일치가 안 된다("회의"로 "회의록" 못 찾음).
   // 트라이그램/ILIKE 를 주 수단으로, tsvector 는 영문 단어 매칭 보조로 쓴다.
@@ -121,6 +200,7 @@ export async function searchPages(
        AND (title ILIKE ${like}
             OR plain_text ILIKE ${like}
             OR search_vector @@ websearch_to_tsquery('simple', ${query}))
+       ${onlyShared}
      ORDER BY score DESC, updated_at DESC
      LIMIT ${limit}
   `)
@@ -142,7 +222,7 @@ export async function searchPagesForLink(
   query: string,
   limit = 8,
 ): Promise<Array<{ id: string; title: string; icon: PageRow['icon'] }>> {
-  await assertWorkspaceMember(actor.userId, workspaceId)
+  const role = await assertWorkspaceMember(actor.userId, workspaceId)
 
   const like = `%${query}%`
   const rows = await db
@@ -153,6 +233,7 @@ export async function searchPagesForLink(
       eq(pages.isTrashed, false),
       isNull(pages.collectionId),
       query.trim() ? sql`${pages.title} ILIKE ${like}` : sql`true`,
+      role === 'guest' ? readableByGuest(actor.userId, pages) : undefined,
     ))
     .orderBy(desc(pages.updatedAt))
     .limit(limit)
@@ -223,7 +304,7 @@ export async function getRecentChanges(
   since: Date,
   limit = 50,
 ) {
-  await assertWorkspaceMember(actor.userId, workspaceId)
+  const role = await assertWorkspaceMember(actor.userId, workspaceId)
   return db
     .select({
       id: pages.id,
@@ -236,6 +317,7 @@ export async function getRecentChanges(
       eq(pages.workspaceId, workspaceId),
       eq(pages.isTrashed, false),
       sql`${pages.updatedAt} >= ${since.toISOString()}`,
+      role === 'guest' ? readableByGuest(actor.userId, pages) : undefined,
     ))
     .orderBy(desc(pages.updatedAt))
     .limit(limit)
@@ -250,8 +332,6 @@ export async function createPage(
     parentId?: string | null
     title?: string
     icon?: PageRow['icon']
-    contentJson?: unknown
-    plainText?: string
     /** 데이터베이스의 행으로 만들 때 채운다. collections.ts 가 넘긴다 */
     collectionId?: string | null
     properties?: Record<string, unknown>
@@ -262,7 +342,9 @@ export async function createPage(
   if (parentId) {
     await assertCanEdit(actor.userId, parentId)
   } else {
-    await assertWorkspaceMember(actor.userId, input.workspaceId)
+    const role = await assertWorkspaceMember(actor.userId, input.workspaceId)
+    // 게스트의 기본 권한은 "없음" 이라, 최상위에 만들면 만든 본인도 못 여는 문서가 된다
+    if (role === 'guest') throw new Forbidden('게스트는 공유받은 문서 안에만 페이지를 만들 수 있습니다')
   }
 
   const parent = parentId ? await loadPage(parentId) : null
@@ -277,8 +359,6 @@ export async function createPage(
     sortKey: await nextSortKey(input.workspaceId, parentId),
     title: input.title ?? '',
     icon: input.icon ?? null,
-    contentJson: input.contentJson ?? null,
-    plainText: input.plainText ?? '',
     collectionId: input.collectionId ?? null,
     properties: input.properties ?? {},
     createdBy: actor.userId,
@@ -297,6 +377,11 @@ export async function updatePageMeta(
   actor: Actor,
   pageId: string,
   patch: { title?: string; icon?: PageRow['icon']; cover?: PageRow['cover'] },
+  /**
+   * audit: false — 제목을 치는 동안의 중간 저장. 600ms 마다 오므로 감사 로그에 남기면
+   * 자동저장 때와 같은 문제(로그 대부분이 타이핑)가 된다. 입력을 마칠 때 한 번 남긴다.
+   */
+  opts: { audit?: boolean } = {},
 ): Promise<PageRow> {
   const access = await assertCanEdit(actor.userId, pageId)
 
@@ -305,300 +390,115 @@ export async function updatePageMeta(
     .where(eq(pages.id, pageId))
     .returning()
 
-  await audit.record(actor, 'page.update_meta', {
-    workspaceId: access.workspaceId, targetId: pageId, meta: patch,
-  })
+  if (opts.audit !== false) {
+    await audit.record(actor, 'page.update_meta', {
+      workspaceId: access.workspaceId, targetId: pageId, meta: patch,
+    })
+  }
   return row
 }
 
-/**
- * 본문 저장. ydoc 이 진실이고 contentJson/plainText 는 파생 스냅샷이다.
- * 웹 에디터는 디바운스로, MCP 는 마크다운→블록 변환 후 호출한다.
- */
-export async function savePageContent(
-  actor: Actor,
-  pageId: string,
-  input: {
-    contentJson?: unknown
-    plainText: string
-    ydoc?: Buffer | null
-    title?: string
-    /**
-     * 본문이 가리키는 페이지 id 들 (백링크용).
-     * **바뀌었을 때만** 보낸다 — 자동저장마다 링크 테이블을 다시 쓰면
-     * 2초짜리 저장 경로에 쓰기 왕복이 두 개(delete + insert) 늘 붙는다.
-     */
-    links?: string[]
-  },
-): Promise<void> {
-  const access = await assertCanEdit(actor.userId, pageId)
-
-  await db.update(pages).set({
-    /**
-     * content_json 은 넘어온 경우에만 쓴다.
-     *
-     * 웹 에디터는 더 이상 보내지 않는다 — ydoc 이 본문의 진실이고
-     * 이 컬럼을 읽는 곳이 없는데도 자동저장마다 100KB 짜리 JSON 을
-     * 같이 실어 보내고 있었다 (큰 문서 기준 페이로드가 두 배였다).
-     * MCP 는 마크다운을 블록으로 바꾼 결과를 그대로 넘기므로 계속 채운다.
-     */
-    ...(input.contentJson !== undefined ? { contentJson: input.contentJson } : {}),
-    plainText: input.plainText,
-    ...(input.ydoc ? { ydoc: input.ydoc } : {}),
-    ...(input.title !== undefined ? { title: input.title } : {}),
-    lastEditedBy: actor.userId,
-    updatedAt: new Date(),
-  }).where(eq(pages.id, pageId))
-
-  if (input.links !== undefined) await replaceOutgoingLinks(pageId, input.links)
-
-  /**
-   * 자동저장은 감사 로그에 남기지 않는다.
-   *
-   * 에디터가 2초마다 저장하므로 이 한 줄이 전체 감사 로그의 78% 를 차지했고
-   * (실측 303/387건), 저장할 때마다 DB 쓰기 왕복이 하나씩 더 붙었다.
-   * "누가 언제 고쳤나" 는 pages.last_edited_by / updated_at 이 이미 담고 있다.
-   *
-   * 다만 MCP 경유 변경은 남긴다 — 출처 추적이 이 로그의 존재 이유다.
-   */
-  if (actor.source !== 'web') {
-    await audit.record(actor, 'page.save_content', {
-      workspaceId: access.workspaceId, targetId: pageId,
-      meta: { chars: input.plainText.length },
-    })
-  }
-}
-
-/**
- * 되돌리기용 스냅샷. 저장마다가 아니라 주기적/명시적으로 호출한다.
- *
- * content_json 은 더 이상 상시 갱신되지 않으므로 여기서 ydoc 을 풀어
- * 그 시점의 블록을 만들어 넣는다. 이쪽이 항상 최신이다.
- */
-export async function snapshotVersion(actor: Actor, pageId: string): Promise<void> {
-  await assertCanEdit(actor.userId, pageId)
-  const page = await loadPage(pageId)
-  const { ydocBytesToBlocks } = await import('./markdown')
-  const blocks = page.ydoc ? await ydocBytesToBlocks(page.ydoc) : page.contentJson
-
-  await db.insert(pageVersions).values({
-    pageId,
-    title: page.title,
-    /**
-     * NULL 을 넣지 않는다.
-     *
-     * 갓 만든 페이지는 ydoc 도 content_json 도 없어서 blocks 가 null 이 되는데,
-     * 그대로 저장하면 나중에 그 버전으로 되돌릴 때 블록 변환기가 null 을 받아 죽는다.
-     * "빈 문서"는 null 이 아니라 빈 배열이다.
-     */
-    contentJson: blocks ?? [],
-    authorId: actor.userId,
-  })
-}
-
-/** BlockNote 는 최소 한 블록을 요구한다. 빈 문서는 빈 문단 하나로 표현한다. */
-const EMPTY_DOC = [{ type: 'paragraph' }]
-
-/**
- * 이 페이지에서 나가는 링크를 통째로 갈아끼운다.
- *
- * 자기 자신을 가리키는 링크는 버린다 — 백링크 목록에 자기가 나오면 헷갈리기만 한다.
- * 대상 페이지가 지워졌으면 FK 가 막으므로, 실재하는 페이지만 남긴다.
- */
-async function replaceOutgoingLinks(fromPageId: string, toIds: string[]): Promise<void> {
-  const targets = [...new Set(toIds)].filter((id) => id && id !== fromPageId)
-
-  await db.delete(pageLinks).where(eq(pageLinks.fromPageId, fromPageId))
-  if (targets.length === 0) return
-
-  const alive = await db
-    .select({ id: pages.id })
-    .from(pages)
-    .where(inArray(pages.id, targets))
-
-  if (alive.length === 0) return
-  await db.insert(pageLinks)
-    .values(alive.map((p) => ({ fromPageId, toPageId: p.id })))
-    .onConflictDoNothing()
-}
-
-export type Backlink = { id: string; title: string; icon: PageRow['icon'] }
-
-/** 이 페이지를 본문에서 가리키는 페이지들 */
-export async function listBacklinks(actor: Actor, pageId: string): Promise<Backlink[]> {
-  await assertCanRead(actor.userId, pageId)
-
-  return db
-    .select({ id: pages.id, title: pages.title, icon: pages.icon })
-    .from(pageLinks)
-    .innerJoin(pages, eq(pages.id, pageLinks.fromPageId))
-    .where(and(eq(pageLinks.toPageId, pageId), eq(pages.isTrashed, false)))
-    .orderBy(asc(pages.title))
-    .limit(50)
-}
-
-/** 스냅샷 최소 간격. 자동저장은 2초마다 도는데 그때마다 찍으면 버전이 수천 개가 된다. */
-export const VERSION_MIN_GAP_MS = 10 * 60 * 1000
-
-export type PageVersionMeta = {
-  id: string
-  title: string
-  authorId: string | null
-  authorName: string | null
-  createdAt: Date
-}
-
-/**
- * 마지막 스냅샷이 충분히 오래됐을 때만 찍는다.
- *
- * 에디터가 저장 직전에 부른다. 그 시점의 ydoc 은 **아직 이번 편집이 반영되기 전**이므로,
- * 결과적으로 "편집을 시작하기 직전 상태"가 남는다 — 되돌릴 때 원하는 게 정확히 그것이다.
- *
- * 클라이언트도 같은 간격으로 자체 제한하지만, 여러 명이 같은 문서를 편집할 때를 위해
- * 서버에서도 한 번 더 막는다.
- */
-export async function snapshotVersionIfStale(actor: Actor, pageId: string): Promise<boolean> {
-  await assertCanEdit(actor.userId, pageId)
-
-  const [last] = await db
-    .select({ createdAt: pageVersions.createdAt })
-    .from(pageVersions)
-    .where(eq(pageVersions.pageId, pageId))
-    .orderBy(desc(pageVersions.createdAt))
-    .limit(1)
-
-  if (last && Date.now() - last.createdAt.getTime() < VERSION_MIN_GAP_MS) return false
-
-  await snapshotVersion(actor, pageId)
-  return true
-}
-
-export async function listVersions(
-  actor: Actor,
-  pageId: string,
-  limit = 30,
-): Promise<PageVersionMeta[]> {
-  await assertCanRead(actor.userId, pageId)
-  return db
-    .select({
-      id: pageVersions.id,
-      title: pageVersions.title,
-      authorId: pageVersions.authorId,
-      authorName: profiles.displayName,
-      createdAt: pageVersions.createdAt,
-    })
-    .from(pageVersions)
-    // 작성자가 워크스페이스를 떠나 프로필이 지워졌어도 버전은 남아야 하므로 LEFT JOIN
-    .leftJoin(profiles, eq(profiles.id, pageVersions.authorId))
-    .where(eq(pageVersions.pageId, pageId))
-    .orderBy(desc(pageVersions.createdAt))
-    .limit(limit)
-}
-
-/**
- * 특정 버전으로 되돌린다.
- *
- * ★ ydoc 을 갱신한다. content_json 만 바꾸면 웹 에디터가 다음 저장 때
- *   자기 ydoc 으로 덮어써서 되돌리기가 사라진다 (MCP 쓰기와 같은 이유).
- *
- * 되돌리기 직전 상태를 먼저 스냅샷으로 남긴다 — **되돌리기도 되돌릴 수 있어야 한다.**
- */
-export async function restoreVersion(
-  actor: Actor,
-  pageId: string,
-  versionId: string,
-): Promise<void> {
-  const access = await assertCanEdit(actor.userId, pageId)
-
-  const [version] = await db
-    .select()
-    .from(pageVersions)
-    .where(and(eq(pageVersions.id, versionId), eq(pageVersions.pageId, pageId)))
-    .limit(1)
-  if (!version) throw new NotFound('Version')
-
-  await snapshotVersion(actor, pageId)
-
-  const page = await loadPage(pageId)
-  const { applyBlocks, blocksToMarkdown } = await import('./markdown')
-
-  // 예전에 NULL 로 저장된 버전이 남아 있을 수 있다
-  const snapshot = Array.isArray(version.contentJson) && version.contentJson.length > 0
-    ? version.contentJson
-    : EMPTY_DOC
-
-  const applied = await applyBlocks(page.ydoc, snapshot)
-
-  await db.update(pages).set({
-    ydoc: applied.ydoc,
-    contentJson: applied.blocks,
-    plainText: await blocksToMarkdown(applied.blocks),
-    title: version.title,
-    lastEditedBy: actor.userId,
-    updatedAt: new Date(),
-  }).where(eq(pages.id, pageId))
-
-  await audit.record(actor, 'page.restore_version', {
-    workspaceId: access.workspaceId,
-    targetId: pageId,
-    meta: { versionId, versionCreatedAt: version.createdAt.toISOString() },
-  })
-}
+type MoveTarget = { parentId: string | null; afterId?: string | null; beforeId?: string | null }
 
 /**
  * 이동 + 순서 변경. 서브트리 path 를 한 번의 UPDATE 로 다시 쓴다.
  * beforeId/afterId 로 형제 사이 위치를 지정한다.
+ *
+ * ★ 같은 룸의 이동은 한 줄로 선다 (트랜잭션 advisory lock).
+ *   검사와 쓰기 사이에 다른 이동이 끼면, 두 사람이 A 를 B 밑으로 · B 를 A 밑으로 동시에
+ *   옮겨 순환이 생긴다. 그래서 잠근 **뒤에** 행을 다시 읽고 검사한다. 이동은 드물어서
+ *   룸 단위로 줄 세워도 기다릴 일이 없다.
  */
-export async function movePage(
-  actor: Actor,
-  pageId: string,
-  target: { parentId: string | null; afterId?: string | null; beforeId?: string | null },
-): Promise<void> {
+export async function movePage(actor: Actor, pageId: string, target: MoveTarget): Promise<void> {
   const access = await assertCanEdit(actor.userId, pageId)
-  if (target.parentId) await assertCanEdit(actor.userId, target.parentId)
-
-  const page = await loadPage(pageId)
-  const oldPrefix = `${page.path}${page.id}/`
-
-  const parent = target.parentId ? await loadPage(target.parentId) : null
-  if (parent) {
-    if (parent.id === page.id) throw new InvalidInput('페이지를 자기 자신 안으로 옮길 수 없습니다')
-    if (parent.path === oldPrefix || parent.path.startsWith(oldPrefix)) {
-      throw new InvalidInput('페이지를 자기 하위 페이지 안으로 옮길 수 없습니다')
-    }
+  if (target.parentId) {
+    await assertCanEdit(actor.userId, target.parentId)
+  } else if (access.role === 'guest') {
+    // 게스트의 기본 권한은 "없음" 이라 최상위로 옮기면 본인도 못 여는 문서가 된다 (createPage 와 같은 규칙)
+    throw new Forbidden('게스트는 공유받은 문서 밖으로 옮길 수 없습니다')
   }
 
-  const [after] = target.afterId
-    ? await db.select({ sortKey: pages.sortKey }).from(pages).where(eq(pages.id, target.afterId)).limit(1)
-    : []
-  const [before] = target.beforeId
-    ? await db.select({ sortKey: pages.sortKey }).from(pages).where(eq(pages.id, target.beforeId)).limit(1)
-    : []
+  const from = await db.transaction(async (tx) => {
+    await tx.execute(xactLock('pageMove', access.workspaceId))
+    const page = await loadPage(pageId, tx)
+    const parent = target.parentId ? await loadPage(target.parentId, tx) : null
+    assertMovable(page, parent)
 
-  const sortKey = (after || before)
-    ? generateKeyBetween(after?.sortKey ?? null, before?.sortKey ?? null)
-    : await nextSortKey(page.workspaceId, target.parentId)
-
-  const newPath = childPath(parent)
-  const newPrefix = `${newPath}${page.id}/`
-
-  await db.transaction(async (tx) => {
+    const sortKey = await sortKeyBetween(tx, page, target)
+    const newPath = childPath(parent)
+    const oldPrefix = `${page.path}${page.id}/`
     await tx.update(pages)
       .set({ parentId: target.parentId, path: newPath, sortKey, updatedAt: new Date() })
       .where(eq(pages.id, pageId))
 
+    /**
+     * ★ ::int 를 빼면 안 된다. 드라이버는 숫자 파라미터를 타입 없이 보내는데, 그러면
+     *   Postgres 가 `substring(text FROM text)` — **정규식** 버전을 고른다. '76' 이라는 패턴은
+     *   안 맞으니 NULL 이 나오고, path 가 NOT NULL 이라 하위 페이지가 있는 이동이 통째로
+     *   실패했다 (test/sql/move-page.test.ts 가 잡았다. 옮기는 화면이 없어서 여태 안 드러났다).
+     */
     await tx.execute(sql`
       UPDATE pages
-         SET path = ${newPrefix} || substring(path from ${oldPrefix.length + 1})
+         SET path = ${`${newPath}${page.id}/`} || substring(path from ${oldPrefix.length + 1}::int)
        WHERE workspace_id = ${page.workspaceId}
          AND path LIKE ${oldPrefix + '%'}
     `)
+    return page.parentId
   })
 
   await audit.record(actor, 'page.move', {
     workspaceId: access.workspaceId, targetId: pageId,
-    meta: { from: page.parentId, to: target.parentId },
+    meta: { from, to: target.parentId },
   })
+}
+
+/** 옮길 수 있는 자리인지. 잠금 안에서 방금 읽은 행으로 본다 */
+function assertMovable(page: PageRow, parent: PageRow | null) {
+  // 행은 표 안에서만 산다 — 사이드바 트리에 없고, 옮기면 표에서 사라진다
+  if (page.collectionId) throw new InvalidInput('데이터베이스의 행은 여기서 옮길 수 없습니다')
+  if (!parent) return
+  if (parent.id === page.id) throw new InvalidInput('페이지를 자기 자신 안으로 옮길 수 없습니다')
+  if (parent.path.startsWith(`${page.path}${page.id}/`)) {
+    throw new InvalidInput('페이지를 자기 하위 페이지 안으로 옮길 수 없습니다')
+  }
+  /**
+   * 다른 룸의 페이지 밑으로는 못 옮긴다. 두 룸에 다 편집 권한이 있으면 권한 검사는
+   * 통과하는데, 그대로 두면 workspace_id 는 옛 룸인 채 path 만 다른 룸을 가리켜서
+   * 트리·권한·검색이 서로 다른 룸을 보게 된다. 룸 사이 이동은 복사로 따로 다뤄야 한다.
+   */
+  if (parent.workspaceId !== page.workspaceId) {
+    throw new InvalidInput('다른 프로젝트 룸으로는 옮길 수 없습니다')
+  }
+  if (parent.collectionId) throw new InvalidInput('데이터베이스의 행 안으로는 옮길 수 없습니다')
+}
+
+/**
+ * 기준 형제(afterId/beforeId) 사이의 정렬 키. 둘 다 없으면 새 부모의 맨 끝.
+ *
+ * 기준 형제는 **옮겨 갈 부모의 자식**이어야 한다. 엉뚱한 곳의 페이지를 넘기면 그쪽 정렬 키
+ * 사이에 끼워져 순서가 뒤죽박죽이 되고, 순서가 뒤집혀 오면(after > before)
+ * generateKeyBetween 이 예외를 던진다.
+ */
+async function sortKeyBetween(ex: Executor, page: PageRow, target: MoveTarget): Promise<string> {
+  const keyOf = async (id: string | null | undefined) => {
+    if (!id) return null
+    const [row] = await ex
+      .select({ sortKey: pages.sortKey, parentId: pages.parentId, workspaceId: pages.workspaceId })
+      .from(pages)
+      .where(eq(pages.id, id))
+      .limit(1)
+    if (!row || row.workspaceId !== page.workspaceId || row.parentId !== (target.parentId ?? null)) {
+      throw new InvalidInput('옮길 위치가 올바르지 않습니다 — 트리를 새로고침해 주세요')
+    }
+    return row.sortKey
+  }
+  const afterKey = await keyOf(target.afterId)
+  const beforeKey = await keyOf(target.beforeId)
+  if (afterKey === null && beforeKey === null) return nextSortKey(page.workspaceId, target.parentId, ex)
+  if (afterKey !== null && beforeKey !== null && afterKey >= beforeKey) {
+    throw new InvalidInput('옮길 위치가 올바르지 않습니다 — 트리를 새로고침해 주세요')
+  }
+  return generateKeyBetween(afterKey, beforeKey)
 }
 
 /** 휴지통으로. 서브트리 전체가 함께 들어간다. */
@@ -641,7 +541,8 @@ export async function listTrashed(
   actor: Actor,
   workspaceId: string,
 ): Promise<TrashedPage[]> {
-  await assertWorkspaceMember(actor.userId, workspaceId)
+  const role = await assertWorkspaceMember(actor.userId, workspaceId)
+  const onlyShared = role === 'guest' ? sql`AND ${readableByGuest(actor.userId, RAW_P)}` : sql``
 
   const rows = await db.execute(sql`
     SELECT p.id, p.title, p.icon, p.trashed_at,
@@ -653,6 +554,7 @@ export async function listTrashed(
      WHERE p.workspace_id = ${workspaceId}
        AND p.is_trashed = true
        AND (p.parent_id IS NULL OR parent.is_trashed = false)
+       ${onlyShared}
      ORDER BY p.trashed_at DESC NULLS LAST
      LIMIT 200
   `)

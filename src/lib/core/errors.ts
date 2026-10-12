@@ -21,3 +21,7 @@ export class Unauthorized extends DomainError {
 export class InvalidInput extends DomainError {
   constructor(message: string) { super(message, 'invalid_input') }
 }
+
+export class TooLarge extends DomainError {
+  constructor(message: string) { super(message, 'too_large') }
+}

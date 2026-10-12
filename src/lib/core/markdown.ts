@@ -3,16 +3,14 @@
  *
  * MCP 와 (나중에) 내보내기 기능이 공유한다. 서버 전용이다.
  *
- * ★ 왜 ydoc 까지 건드리나:
- *   ydoc 이 본문의 진실이고 content_json 은 파생 스냅샷이다.
- *   MCP 가 content_json 만 바꾸면 웹 에디터가 다음 저장 때 자기 ydoc 으로
- *   덮어써서 변경이 사라진다. 그래서 반드시 ydoc 을 갱신해야 한다.
+ * ★ 왜 ydoc 을 건드리나:
+ *   ydoc 이 본문의 유일한 진실이다. 쓰기는 전부 "지금 ydoc 에 얹을 증분(delta)" 을
+ *   만들어 lib/core/page-content.ts 의 applyYdocUpdate 로 넘긴다 — 거기서 저장된 상태와
+ *   병합되므로, 그 사이 누가 편집했어도 서로를 지우지 않는다.
  */
 import 'server-only'
 import * as Y from 'yjs'
-
-/** Editor.tsx 의 doc.getXmlFragment('blocknote') 와 반드시 같아야 한다 */
-export const FRAGMENT = 'blocknote'
+import { FRAGMENT } from '@/lib/ydoc'
 
 /**
  * 커스텀 스키마를 넘기면 ServerBlockNoteEditor 의 제네릭이 그 스키마로 좁혀진다.
@@ -129,22 +127,13 @@ export async function editMarkdown(
 }
 
 export type ApplyResult = {
-  /** 저장할 전체 ydoc 상태 */
-  ydoc: Buffer
-  /** 파생 스냅샷 */
-  blocks: unknown
-  /** 열려 있는 클라이언트에게 브로드캐스트할 증분 */
+  /**
+   * 넘겨받은 ydoc 위에 얹을 증분. applyYdocUpdate 에 그대로 넘긴다.
+   * 전체 상태가 아니라 증분이라 저장 요청이 작고, 서버에서 병합해도 뜻이 같다.
+   */
   delta: Uint8Array
 }
 
-/**
- * 기존 ydoc 에 마크다운을 적용한다.
- *
- * 주의: blocksToYXmlFragment 는 프래그먼트를 **교체**한다 (이어붙이지 않는다).
- * 그래서 append/prepend 는 기존 블록을 읽어 합친 뒤 통째로 다시 쓴다.
- * 결과적으로 이 연산은 문서 전체를 갈아끼우는 굵은 CRDT 변경이라,
- * 같은 시점에 사람이 편집 중이었다면 MCP 쪽이 이긴다. 의도된 트레이드오프다.
- */
 /**
  * 저장해 둔 블록 배열을 그대로 ydoc 에 적용한다.
  *
@@ -165,13 +154,17 @@ export async function applyBlocks(
   const beforeSV = Y.encodeStateVector(doc)
   ed.blocksToYXmlFragment(blocks as never, doc.getXmlFragment(FRAGMENT))
 
-  return {
-    ydoc: Buffer.from(Y.encodeStateAsUpdate(doc)),
-    blocks: ed.yDocToBlocks(doc, FRAGMENT),
-    delta: Y.encodeStateAsUpdate(doc, beforeSV),
-  }
+  return { delta: Y.encodeStateAsUpdate(doc, beforeSV) }
 }
 
+/**
+ * 기존 ydoc 에 마크다운을 적용한다.
+ *
+ * 주의: blocksToYXmlFragment 는 프래그먼트를 **교체**한다 (이어붙이지 않는다).
+ * 그래서 append/prepend 는 기존 블록을 읽어 합친 뒤 통째로 다시 쓴다.
+ * y-prosemirror 가 차이만 계산하므로 실제로 바뀐 블록만 CRDT 변경이 된다.
+ * 같은 때 사람이 편집 중이었어도 서버에서 병합되므로 어느 한쪽이 통째로 사라지지 않는다.
+ */
 export async function applyMarkdown(
   current: Buffer | Uint8Array | null,
   markdown: string,
@@ -196,9 +189,5 @@ export async function applyMarkdown(
 
   ed.blocksToYXmlFragment(next, doc.getXmlFragment(FRAGMENT))
 
-  return {
-    ydoc: Buffer.from(Y.encodeStateAsUpdate(doc)),
-    blocks: ed.yDocToBlocks(doc, FRAGMENT),
-    delta: Y.encodeStateAsUpdate(doc, beforeSV),
-  }
+  return { delta: Y.encodeStateAsUpdate(doc, beforeSV) }
 }

@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server'
-import { sql } from 'drizzle-orm'
-import { db } from '@/lib/core/db'
+import { pingDatabase } from '@/lib/core/health'
 
 export const dynamic = 'force-dynamic'
 
@@ -13,7 +12,7 @@ export const dynamic = 'force-dynamic'
 export async function GET() {
   const started = Date.now()
   try {
-    await db.execute(sql`select 1`)
+    await pingDatabase()
     return NextResponse.json({
       status: 'ok',
       db: 'connected',

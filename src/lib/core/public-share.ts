@@ -134,20 +134,95 @@ export async function resolvePublicPage(slug: string): Promise<PublicPage | null
 }
 
 /**
- * 공개 페이지에 넣기 전 최소한의 방어.
+ * 공개 페이지에 넣기 전 마지막 방어.
  *
- * 본문은 우리 에디터가 만든 블록에서 나오므로 원래 스크립트가 들어갈 자리가 없다.
- * 그래도 이건 **로그인 없이 아무나 여는 화면**이라, 붙여넣기나 MCP 로 흘러든
- * 이상한 값이 그대로 실행되지 않도록 한 겹 더 막는다.
- *   - script/iframe/object 등 실행 가능한 태그 제거
- *   - on* 이벤트 속성 제거
- *   - javascript:, data:text/html 스킴 무력화
+ * 본문은 우리 에디터가 만든 블록에서 나온다 — 직렬화기가 글자 속 `<` 를 `&lt;` 로
+ * 바꾸므로 태그를 끼워 넣을 수는 없다. 뚫리는 곳은 **속성 값**이다. 파일 블록의 URL 에
+ * `java\nscript:` 를 넣으면 직렬화기는 그대로 내보내고, 브라우저는 URL 의 줄바꿈을
+ * 지운 뒤 스크립트로 연다. 이 화면은 **로그인 없이 아무나 열고, 앱과 출처가 같다.**
+ *
+ * 그래서 문자열을 여기저기 지우는 대신 태그를 하나씩 읽어 **다시 조립한다.**
+ *   - 속성은 이름·값을 따로 읽고 안전한 것만 다시 쓴다. on* 는 버리고,
+ *     URL 속성은 브라우저처럼 정규화한 뒤 스킴을 허용 목록으로 본다.
+ *   - 태그로 읽히지 않는 `<` 는 `&lt;` 로 바꾼다. 우리가 못 읽은 것을 브라우저가
+ *     태그로 읽는 일이 없게 하려는 것이다.
+ *   - 글자는 건드리지 않는다. 예전 방식은 본문의 `onClick={go}` 같은 글자까지 지웠다.
+ *
+ * 입력이 잘 짜인 HTML(직렬화기 출력)이라 정규식이 되돌아갈 일이 없다.
  */
 export function sanitizeHtml(html: string): string {
   return html
-    .replace(/<\s*(script|iframe|object|embed|link|meta|style)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
-    .replace(/<\s*(script|iframe|object|embed|link|meta|style)\b[^>]*\/?>/gi, '')
-    .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-    .replace(/(href|src)\s*=\s*("|')\s*javascript:[^"']*\2/gi, '$1="#"')
-    .replace(/(href|src)\s*=\s*("|')\s*data:text\/html[^"']*\2/gi, '$1="#"')
+    // 스크립트·스타일은 내용까지 지운다. 태그만 지우면 코드가 본문 글자로 드러난다
+    .replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, '')
+    .replace(TOKEN, (token, endName?: string, name?: string, attrs?: string) => {
+      if (endName) return DROPPED_TAGS.has(endName.toLowerCase()) ? '' : `</${endName}>`
+      if (name) return DROPPED_TAGS.has(name.toLowerCase()) ? '' : rebuildTag(name, attrs ?? '')
+      return token === '<' ? '&lt;' : '' // 주석은 버린다
+    })
+}
+
+/** 주석 | 닫는 태그 | 여는 태그 | 태그가 못 된 `<`. 따옴표 안의 `>` 는 태그의 끝이 아니다 */
+const TOKEN =
+  /<!--[\s\S]*?-->|<\/([a-zA-Z][\w:-]*)(?:"[^"]*"|'[^']*'|[^'">])*>|<([a-zA-Z][\w:-]*)((?:"[^"]*"|'[^']*'|[^'">])*)>|</g
+
+/** 이름[=값]. 값은 큰따옴표 | 작은따옴표 | 따옴표 없음 */
+const ATTR = /([^\s"'>/=]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'=<>`]+))?/g
+
+/**
+ * 여는·닫는 태그를 버리는 요소. 안의 내용은 남아서 다시 걸러진다.
+ *   - 실행하거나 다른 문서를 끌어오는 것
+ *   - 브라우저가 안을 **글자로** 읽는 것(style, textarea, title …) 과 svg/math.
+ *     남겨 두면 우리가 태그로 읽은 곳과 브라우저가 태그로 읽는 곳이 어긋난다.
+ */
+const DROPPED_TAGS = new Set([
+  'script', 'style', 'iframe', 'frame', 'frameset', 'object', 'embed', 'applet',
+  'base', 'link', 'meta', 'form', 'template', 'noscript', 'noembed', 'noframes',
+  'textarea', 'title', 'xmp', 'plaintext', 'svg', 'math',
+])
+
+/** 값이 URL 로 쓰이는 속성 */
+const URL_ATTRS = new Set([
+  'href', 'src', 'xlink:href', 'action', 'formaction', 'poster', 'background', 'data', 'ping', 'cite',
+])
+
+const SAFE_SCHEMES = new Set(['http', 'https', 'mailto', 'tel'])
+
+function rebuildTag(name: string, attrs: string): string {
+  let out = `<${name}`
+  for (const [, key, value] of attrs.matchAll(ATTR)) {
+    const lower = key.toLowerCase()
+    if (lower.startsWith('on') || lower === 'srcdoc') continue
+    if (value === undefined) out += ` ${key}`
+    else if (URL_ATTRS.has(lower) && !isSafeUrl(unquote(value), lower)) out += ` ${key}="#"`
+    else out += ` ${key}=${value}`
+  }
+  return `${out}>`
+}
+
+function unquote(value: string) {
+  return value[0] === '"' || value[0] === "'" ? value.slice(1, -1) : value
+}
+
+/**
+ * 브라우저가 보는 스킴으로 판단한다. 브라우저는 속성 값의 문자 참조를 풀고,
+ * URL 에서 탭·줄바꿈을 지우고 앞의 제어 문자·공백을 무시한다.
+ * 여기서는 제어 문자·공백을 **전부** 지운다 — 더 많이 막을 뿐 덜 막지는 않는다.
+ * 스킴이 없으면(상대 경로) 통과. 이미지 src 만 data:image 를 허용한다.
+ */
+function isSafeUrl(raw: string, attr: string): boolean {
+  const url = decodeCharRefs(raw).replace(/[\x00-\x20\x7f]/g, '')
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(url)?.[1].toLowerCase()
+  if (!scheme || SAFE_SCHEMES.has(scheme)) return true
+  return attr === 'src' && /^data:image\/(?:png|jpe?g|gif|webp|avif);/i.test(url)
+}
+
+/** 스킴을 숨기는 데 쓸 수 있는 참조만 푼다: 숫자 참조와 &Tab; &NewLine; &colon; */
+const NAMED_REFS: Record<string, string> = { tab: '\t', newline: '\n', colon: ':', amp: '&' }
+
+function decodeCharRefs(value: string): string {
+  return value.replace(/&(?:#x([0-9a-f]+)|#(\d+)|([a-z]+));?/gi, (ref, hex?: string, dec?: string, named?: string) => {
+    if (named) return NAMED_REFS[named.toLowerCase()] ?? ref
+    const code = hex ? parseInt(hex, 16) : Number(dec)
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '�'
+  })
 }
